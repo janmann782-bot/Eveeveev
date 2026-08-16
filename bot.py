@@ -30,6 +30,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "7787565361"))
 POST_INTERVAL_HOURS = 1
 # Примеры: google/gemini-2.5-flash | deepseek/deepseek-chat-v3-0324:free | meta-llama/llama-3.3-70b-instruct:free
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat-v3-0324:free")
+CURRENT_MODEL = OPENROUTER_MODEL
 
 # ================== ЛОГИ ==================
 logging.basicConfig(
@@ -94,7 +95,7 @@ def _call_openrouter(api_key: str, user_prompt: str) -> str:
 
     url = "https://openrouter.ai/api/v1/chat/completions"
     payload = {
-        "model": OPENROUTER_MODEL,
+        "model": CURRENT_MODEL,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
@@ -180,7 +181,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Бот Рализма 2060 онлайн.\n\n"
         "Команды:\n"
-        "/key <ключ> — импорт / смена OpenRouter API-ключа\n"
+        "/key <ключ> — OpenRouter API-ключ\n"
+        "/model <id> — сменить модель\n"
+        "/models — список рекомендуемых\n"
         "/post — сгенерировать и кинуть в канал\n"
         "/post <тема> — то же с темой\n"
         "/status — статус\n\n"
@@ -198,6 +201,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Админ: {ADMIN_ID}\n"
         f"Интервал: каждый {POST_INTERVAL_HOURS} час\n"
         f"OpenRouter key: {masked}\n"
+        f"Model: {context.bot_data.get('model', OPENROUTER_MODEL)}\n"
         f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
 
@@ -264,6 +268,80 @@ async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ошибка при установке ключа:\n{e}")
 
 
+
+async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    await update.message.reply_text(
+        "Рекомендуемые модели OpenRouter:\n\n"
+        "Бесплатные:\n"
+        "• deepseek/deepseek-chat-v3-0324:free\n"
+        "• meta-llama/llama-3.3-70b-instruct:free\n"
+        "• google/gemma-3-27b-it:free\n"
+        "• qwen/qwen3-235b-a22b:free\n\n"
+        "Платные (лучше по качеству):\n"
+        "• google/gemini-2.5-flash\n"
+        "• google/gemini-2.5-pro\n"
+        "• anthropic/claude-sonnet-4\n"
+        "• deepseek/deepseek-chat\n\n"
+        "Сменить:\n"
+        "/model deepseek/deepseek-chat-v3-0324:free\n"
+        "/model google/gemini-2.5-flash"
+    )
+
+
+async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Смена модели OpenRouter на лету."""
+    global CURRENT_MODEL
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Только админ.")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            f"Текущая модель:\n`{CURRENT_MODEL}`\n\n"
+            "Сменить: /model provider/model-name\n"
+            "Список: /models"
+        )
+        return
+
+    new_model = context.args[0].strip()
+    if "/" not in new_model and not new_model.endswith(":free"):
+        # allow short names but warn
+        pass
+    if len(new_model) < 3:
+        await update.message.reply_text("Слишком короткое имя модели.")
+        return
+
+    CURRENT_MODEL = new_model
+    context.bot_data["model"] = new_model
+
+    # persist to .env
+    try:
+        env_path = ".env"
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            with open(env_path, "w", encoding="utf-8") as f:
+                found = False
+                for line in lines:
+                    if line.startswith("OPENROUTER_MODEL="):
+                        f.write(f"OPENROUTER_MODEL={new_model}\n")
+                        found = True
+                    else:
+                        f.write(line)
+                if not found:
+                    f.write(f"\nOPENROUTER_MODEL={new_model}\n")
+        else:
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.write(f"OPENROUTER_MODEL={new_model}\n")
+    except Exception as e:
+        logger.warning(f"Не удалось записать модель в .env: {e}")
+
+    await update.message.reply_text(f"Модель сменена на:\n`{new_model}`")
+    logger.info(f"Model changed to {new_model}")
+
+
 async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("Только админ.")
@@ -301,6 +379,7 @@ async def hourly_post(context: ContextTypes.DEFAULT_TYPE):
 async def post_init(app: Application):
     app.bot_data["api_key"] = OPENROUTER_API_KEY
     app.bot_data["client"] = setup_client()
+    app.bot_data["model"] = CURRENT_MODEL
     logger.info(f"OpenRouter ready, model={OPENROUTER_MODEL}")
 
 
@@ -319,6 +398,8 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("key", cmd_key))
+    app.add_handler(CommandHandler("model", cmd_model))
+    app.add_handler(CommandHandler("models", cmd_models))
     app.add_handler(CommandHandler("post", cmd_post))
 
     # JobQueue для почасового постинга
