@@ -27,16 +27,16 @@ pip install -r requirements.txt
 
 ```
 TELEGRAM_TOKEN=токен_бота_от_BotFather
-GEMINI_API_KEY=твой_ключ_Gemini   # пример уже стоит, замени
+GEMINI_API_KEY=твой_ключ_OpenRouter   # пример уже стоит, замени
 CHANNEL_ID=-1004341947372
 ADMIN_ID=7787565361
 ```
 
 **Важно:**
 1. Бот должен быть **админом** канала (право писать сообщения).
-2. Ключ Gemini — из Google AI Studio (https://aistudio.google.com/).  
-   С 2026 года ключи начинаются на `AQ.` — это нормально. Бот уже на новом SDK `google-genai`, который их понимает.
-3. Модель по умолчанию: `gemini-2.0-flash`. Можно поменять в `bot.py`.
+2. Ключ OpenRouter — из Google AI Studio (https://aistudio.google.com/).  
+   С 2026 года ключи начинаются на `sk-or-v1-` — это нормально. Бот уже на новом SDK `google-genai`, который их понимает.
+3. Модель по умолчанию: `openrouter-2.0-flash`. Можно поменять в `bot.py`.
 
 ## Запуск
 

@@ -23,11 +23,13 @@ load_dotenv()
 
 # ================== КОНФИГ ==================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "ВСТАВЬ_ТОКЕН_БОТА")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6I9-SuKztpePtnTqVCtNMFNrzfm1swnDGmoMjcfwQ89LA")
+# OpenRouter key: sk-or-v1-...
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "-1004341947372"))
 ADMIN_ID = int(os.getenv("ADMIN_ID", "7787565361"))
 POST_INTERVAL_HOURS = 1
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+# Примеры: google/gemini-2.5-flash | deepseek/deepseek-chat-v3-0324:free | meta-llama/llama-3.3-70b-instruct:free
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat-v3-0324:free")
 
 # ================== ЛОГИ ==================
 logging.basicConfig(
@@ -72,40 +74,34 @@ SYSTEM_PROMPT = """
 Только текст обращения. Без кавычек, без «Вот обращение:», без пояснений. Начинай сразу. Можно начинать с «Граждане САР Кефирстан…», «Тем, кто ещё читает договоры…», «Я снова вынужден…» и т.п.
 """
 
-# ================== GEMINI ==================
+# ================== OPENROUTER ==================
 import json
 import urllib.request
 import urllib.error
 
-def setup_gemini(api_key: str | None = None):
-    """Просто хранит ключ. Генерация идёт через raw HTTP — надёжнее с AQ. ключами."""
-    return api_key or GEMINI_API_KEY
+def setup_client(api_key: str | None = None):
+    """Хранит API-ключ OpenRouter."""
+    return api_key or OPENROUTER_API_KEY
 
 
-def _call_gemini_http(api_key: str, user_prompt: str) -> str:
-    """Прямой вызов generativelanguage.googleapis.com (как в рабочем curl)."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+def _call_openrouter(api_key: str, user_prompt: str) -> str:
+    """Вызов OpenRouter Chat Completions (OpenAI-compatible)."""
+    if not api_key or not api_key.startswith("sk-or-"):
+        raise RuntimeError(
+            "Нужен ключ OpenRouter вида sk-or-v1-...\n"
+            "Поставь через /key sk-or-v1-..."
+        )
 
-    # Система + задание в одном тексте — максимум совместимости с AQ-ключами
-    full_prompt = (
-        SYSTEM_PROMPT.strip()
-        + "\n\n---\n\n"
-        + "ЗАДАНИЕ:\n"
-        + user_prompt.strip()
-    )
-
+    url = "https://openrouter.ai/api/v1/chat/completions"
     payload = {
-        "contents": [
-            {
-                "parts": [{"text": full_prompt}],
-            }
+        "model": OPENROUTER_MODEL,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
         ],
-        "generationConfig": {
-            "temperature": 0.95,
-            "topP": 0.92,
-            "topK": 40,
-            "maxOutputTokens": 1024,
-        },
+        "temperature": 0.95,
+        "top_p": 0.92,
+        "max_tokens": 1024,
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -113,7 +109,9 @@ def _call_gemini_http(api_key: str, user_prompt: str) -> str:
         data=data,
         headers={
             "Content-Type": "application/json",
-            "X-goog-api-key": api_key,
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": "https://t.me/ralizm_bot",
+            "X-Title": "Ralizm 2060 Bot",
         },
         method="POST",
     )
@@ -124,20 +122,20 @@ def _call_gemini_http(api_key: str, user_prompt: str) -> str:
         err_body = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"HTTP {e.code}: {err_body[:900]}") from e
 
-    if "candidates" not in body or not body["candidates"]:
-        raise RuntimeError(f"Нет candidates: {json.dumps(body, ensure_ascii=False)[:700]}")
+    if "error" in body:
+        raise RuntimeError(f"OpenRouter error: {json.dumps(body['error'], ensure_ascii=False)[:700]}")
 
-    cand = body["candidates"][0]
-    if cand.get("finishReason") in ("SAFETY", "RECITATION"):
-        raise RuntimeError(f"Ответ заблокирован: {cand.get('finishReason')}")
+    choices = body.get("choices") or []
+    if not choices:
+        raise RuntimeError(f"Пустой ответ: {json.dumps(body, ensure_ascii=False)[:500]}")
 
-    text = cand.get("content", {}).get("parts", [{}])[0].get("text", "")
+    text = (choices[0].get("message") or {}).get("content") or ""
     return text.strip()
 
 
 async def generate_appeal(client, topic: str | None = None) -> str:
-    """Генерирует обращение Рализма. client здесь = api_key (строка)."""
-    api_key = client if isinstance(client, str) else (client or GEMINI_API_KEY)
+    """Генерирует обращение Рализма. client = api_key (строка)."""
+    api_key = client if isinstance(client, str) else (client or OPENROUTER_API_KEY)
 
     if topic:
         user_prompt = (
@@ -154,15 +152,15 @@ async def generate_appeal(client, topic: str | None = None) -> str:
         )
 
     try:
-        text = await asyncio.to_thread(_call_gemini_http, api_key, user_prompt)
+        text = await asyncio.to_thread(_call_openrouter, api_key, user_prompt)
         if not text:
-            raise RuntimeError("Пустой ответ от Gemini")
+            raise RuntimeError("Пустой ответ от модели")
         for prefix in ("Обращение:", "Текст:", "Вот текст:", "Вот обращение:"):
             if text.lower().startswith(prefix.lower()):
                 text = text[len(prefix):].strip()
         return text
     except Exception as e:
-        logger.error(f"Gemini error: {e}")
+        logger.error(f"OpenRouter error: {e}")
         return (
             "Граждане.\n\n"
             "Сегодня система генерации текста решила, что у неё технический сбой. "
@@ -182,7 +180,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Бот Рализма 2060 онлайн.\n\n"
         "Команды:\n"
-        "/key <ключ> — импорт / смена Gemini API-ключа\n"
+        "/key <ключ> — импорт / смена OpenRouter API-ключа\n"
         "/post — сгенерировать и кинуть в канал\n"
         "/post <тема> — то же с темой\n"
         "/status — статус\n\n"
@@ -193,19 +191,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    key = context.bot_data.get("api_key") or GEMINI_API_KEY
+    key = context.bot_data.get("api_key") or OPENROUTER_API_KEY
     masked = (key[:6] + "…" + key[-4:]) if key and len(key) > 12 else "не задан"
     await update.message.reply_text(
         f"Канал: {CHANNEL_ID}\n"
         f"Админ: {ADMIN_ID}\n"
         f"Интервал: каждый {POST_INTERVAL_HOURS} час\n"
-        f"Gemini key: {masked}\n"
+        f"OpenRouter key: {masked}\n"
         f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
 
 
 async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Импорт / смена Gemini API-ключа на лету."""
+    """Импорт / смена OpenRouter API-ключа на лету."""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("Только админ.")
         return
@@ -213,8 +211,8 @@ async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Использование:\n"
-            "/key AQ.твой_ключ_сюда\n\n"
-            "Ключ сразу применится, перезапуск не нужен."
+            "/key sk-or-v1-твой_ключ\n\n"
+            "Ключ OpenRouter. Сразу применится, перезапуск не нужен."
         )
         return
 
@@ -222,10 +220,13 @@ async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(new_key) < 20:
         await update.message.reply_text("Ключ слишком короткий. Проверь.")
         return
+    if not new_key.startswith("sk-or-"):
+        await update.message.reply_text("Ожидается ключ OpenRouter: sk-or-v1-...")
+        return
 
     try:
         # пробуем создать клиент с новым ключом
-        new_client = setup_gemini(new_key)
+        new_client = setup_client(new_key)
         context.bot_data["client"] = new_client
         context.bot_data["api_key"] = new_key
         # сохраняем в .env на будущее (если файл есть)
@@ -237,16 +238,16 @@ async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with open(env_path, "w", encoding="utf-8") as f:
                     found = False
                     for line in lines:
-                        if line.startswith("GEMINI_API_KEY="):
-                            f.write(f"GEMINI_API_KEY={new_key}\n")
+                        if line.startswith("OPENROUTER_API_KEY="):
+                            f.write(f"OPENROUTER_API_KEY={new_key}\n")
                             found = True
                         else:
                             f.write(line)
                     if not found:
-                        f.write(f"\nGEMINI_API_KEY={new_key}\n")
+                        f.write(f"\nOPENROUTER_API_KEY={new_key}\n")
             else:
                 with open(env_path, "w", encoding="utf-8") as f:
-                    f.write(f"GEMINI_API_KEY={new_key}\n")
+                    f.write(f"OPENROUTER_API_KEY={new_key}\n")
         except Exception as e:
             logger.warning(f"Не удалось записать .env: {e}")
 
@@ -257,7 +258,7 @@ async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Маска: `{masked}`\n"
             f"Клиент пересоздан. Можно сразу жать /post."
         )
-        logger.info("Gemini API key updated via /key")
+        logger.info("OpenRouter API key updated via /key")
     except Exception as e:
         logger.error(f"/key error: {e}")
         await update.message.reply_text(f"Ошибка при установке ключа:\n{e}")
@@ -298,9 +299,9 @@ async def hourly_post(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(app: Application):
-    app.bot_data["api_key"] = GEMINI_API_KEY
-    app.bot_data["client"] = setup_gemini()
-    logger.info("Gemini client ready (AQ. key support)")
+    app.bot_data["api_key"] = OPENROUTER_API_KEY
+    app.bot_data["client"] = setup_client()
+    logger.info(f"OpenRouter ready, model={OPENROUTER_MODEL}")
 
 
 def main():
