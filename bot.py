@@ -75,6 +75,7 @@ SYSTEM_PROMPT = """
 # ================== GEMINI ==================
 import json
 import urllib.request
+import urllib.error
 
 def setup_gemini(api_key: str | None = None):
     """Просто хранит ключ. Генерация идёт через raw HTTP — надёжнее с AQ. ключами."""
@@ -84,14 +85,19 @@ def setup_gemini(api_key: str | None = None):
 def _call_gemini_http(api_key: str, user_prompt: str) -> str:
     """Прямой вызов generativelanguage.googleapis.com (как в рабочем curl)."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+    # Система + задание в одном тексте — максимум совместимости с AQ-ключами
+    full_prompt = (
+        SYSTEM_PROMPT.strip()
+        + "\n\n---\n\n"
+        + "ЗАДАНИЕ:\n"
+        + user_prompt.strip()
+    )
+
     payload = {
-        "system_instruction": {
-            "parts": [{"text": SYSTEM_PROMPT}]
-        },
         "contents": [
             {
-                "role": "user",
-                "parts": [{"text": user_prompt}],
+                "parts": [{"text": full_prompt}],
             }
         ],
         "generationConfig": {
@@ -111,14 +117,21 @@ def _call_gemini_http(api_key: str, user_prompt: str) -> str:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-    text = (
-        body.get("candidates", [{}])[0]
-        .get("content", {})
-        .get("parts", [{}])[0]
-        .get("text", "")
-    )
+    try:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {e.code}: {err_body[:900]}") from e
+
+    if "candidates" not in body or not body["candidates"]:
+        raise RuntimeError(f"Нет candidates: {json.dumps(body, ensure_ascii=False)[:700]}")
+
+    cand = body["candidates"][0]
+    if cand.get("finishReason") in ("SAFETY", "RECITATION"):
+        raise RuntimeError(f"Ответ заблокирован: {cand.get('finishReason')}")
+
+    text = cand.get("content", {}).get("parts", [{}])[0].get("text", "")
     return text.strip()
 
 
