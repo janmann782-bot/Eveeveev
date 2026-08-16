@@ -12,8 +12,6 @@ import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 
-from google import genai
-from google.genai import types
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -29,7 +27,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6I9-SuKztpePtnTqVCtNMFNrzf
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "-1004341947372"))
 ADMIN_ID = int(os.getenv("ADMIN_ID", "7787565361"))
 POST_INTERVAL_HOURS = 1
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # ================== ЛОГИ ==================
 logging.basicConfig(
@@ -75,15 +73,59 @@ SYSTEM_PROMPT = """
 """
 
 # ================== GEMINI ==================
+import json
+import urllib.request
+
 def setup_gemini(api_key: str | None = None):
-    """Создаёт клиент нового google-genai SDK (поддерживает AQ. ключи)."""
-    key = api_key or GEMINI_API_KEY
-    client = genai.Client(api_key=key)
-    return client
+    """Просто хранит ключ. Генерация идёт через raw HTTP — надёжнее с AQ. ключами."""
+    return api_key or GEMINI_API_KEY
+
+
+def _call_gemini_http(api_key: str, user_prompt: str) -> str:
+    """Прямой вызов generativelanguage.googleapis.com (как в рабочем curl)."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    payload = {
+        "system_instruction": {
+            "parts": [{"text": SYSTEM_PROMPT}]
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": user_prompt}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.95,
+            "topP": 0.92,
+            "topK": 40,
+            "maxOutputTokens": 1024,
+        },
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "X-goog-api-key": api_key,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    text = (
+        body.get("candidates", [{}])[0]
+        .get("content", {})
+        .get("parts", [{}])[0]
+        .get("text", "")
+    )
+    return text.strip()
 
 
 async def generate_appeal(client, topic: str | None = None) -> str:
-    """Генерирует обращение Рализма."""
+    """Генерирует обращение Рализма. client здесь = api_key (строка)."""
+    api_key = client if isinstance(client, str) else (client or GEMINI_API_KEY)
+
     if topic:
         user_prompt = (
             f"Напиши новое обращение Тимофея Рализма на тему: {topic}. "
@@ -99,19 +141,9 @@ async def generate_appeal(client, topic: str | None = None) -> str:
         )
 
     try:
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=GEMINI_MODEL,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                temperature=0.95,
-                top_p=0.92,
-                top_k=40,
-                max_output_tokens=1024,
-            ),
-        )
-        text = (response.text or "").strip()
+        text = await asyncio.to_thread(_call_gemini_http, api_key, user_prompt)
+        if not text:
+            raise RuntimeError("Пустой ответ от Gemini")
         for prefix in ("Обращение:", "Текст:", "Вот текст:", "Вот обращение:"):
             if text.lower().startswith(prefix.lower()):
                 text = text[len(prefix):].strip()
@@ -121,6 +153,7 @@ async def generate_appeal(client, topic: str | None = None) -> str:
         return (
             "Граждане.\n\n"
             "Сегодня система генерации текста решила, что у неё технический сбой. "
+            f"Техническая причина: {e}\n\n"
             "Я это называю «неисполнение контракта». Исполнитель будет заменён. "
             "А вы пока не выходите из договора. Потому что альтернатива — это не свобода, "
             "а очередь к чужому унитазу.\n\n"
