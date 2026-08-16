@@ -12,16 +12,14 @@ import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
-    MessageHandler,
-    filters,
 )
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 load_dotenv()
 
@@ -76,22 +74,14 @@ SYSTEM_PROMPT = """
 """
 
 # ================== GEMINI ==================
-def setup_gemini():
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        system_instruction=SYSTEM_PROMPT,
-        generation_config={
-            "temperature": 0.95,
-            "top_p": 0.92,
-            "top_k": 40,
-            "max_output_tokens": 1024,
-        },
-    )
-    return model
+def setup_gemini(api_key: str | None = None):
+    """Создаёт клиент нового google-genai SDK (поддерживает AQ. ключи)."""
+    key = api_key or GEMINI_API_KEY
+    client = genai.Client(api_key=key)
+    return client
 
 
-async def generate_appeal(model, topic: str | None = None) -> str:
+async def generate_appeal(client, topic: str | None = None) -> str:
     """Генерирует обращение Рализма."""
     if topic:
         user_prompt = (
@@ -109,11 +99,18 @@ async def generate_appeal(model, topic: str | None = None) -> str:
 
     try:
         response = await asyncio.to_thread(
-            model.generate_content,
-            user_prompt,
+            client.models.generate_content,
+            model="gemini-2.0-flash",
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.95,
+                top_p=0.92,
+                top_k=40,
+                max_output_tokens=1024,
+            ),
         )
-        text = response.text.strip()
-        # Небольшая страховка от лишних обёрток
+        text = (response.text or "").strip()
         for prefix in ("Обращение:", "Текст:", "Вот текст:", "Вот обращение:"):
             if text.lower().startswith(prefix.lower()):
                 text = text[len(prefix):].strip()
@@ -136,11 +133,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     await update.message.reply_text(
-        "Бот Рализма 2060 онлайн.\n"
+        "Бот Рализма 2060 онлайн.\n\n"
         "Команды:\n"
-        "/post — сгенерировать и сразу кинуть в канал\n"
-        "/post <тема> — то же самое с темой\n"
-        "/status — статус\n"
+        "/key <ключ> — импорт / смена Gemini API-ключа\n"
+        "/post — сгенерировать и кинуть в канал\n"
+        "/post <тема> — то же с темой\n"
+        "/status — статус\n\n"
         "Автопостинг раз в час."
     )
 
@@ -148,12 +146,74 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
+    key = context.bot_data.get("api_key") or GEMINI_API_KEY
+    masked = (key[:6] + "…" + key[-4:]) if key and len(key) > 12 else "не задан"
     await update.message.reply_text(
         f"Канал: {CHANNEL_ID}\n"
         f"Админ: {ADMIN_ID}\n"
         f"Интервал: каждый {POST_INTERVAL_HOURS} час\n"
+        f"Gemini key: {masked}\n"
         f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
+
+
+async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Импорт / смена Gemini API-ключа на лету."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Только админ.")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Использование:\n"
+            "/key AQ.твой_ключ_сюда\n\n"
+            "Ключ сразу применится, перезапуск не нужен."
+        )
+        return
+
+    new_key = context.args[0].strip()
+    if len(new_key) < 20:
+        await update.message.reply_text("Ключ слишком короткий. Проверь.")
+        return
+
+    try:
+        # пробуем создать клиент с новым ключом
+        new_client = setup_gemini(new_key)
+        context.bot_data["client"] = new_client
+        context.bot_data["api_key"] = new_key
+        # сохраняем в .env на будущее (если файл есть)
+        try:
+            env_path = ".env"
+            if os.path.exists(env_path):
+                with open(env_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                with open(env_path, "w", encoding="utf-8") as f:
+                    found = False
+                    for line in lines:
+                        if line.startswith("GEMINI_API_KEY="):
+                            f.write(f"GEMINI_API_KEY={new_key}\n")
+                            found = True
+                        else:
+                            f.write(line)
+                    if not found:
+                        f.write(f"\nGEMINI_API_KEY={new_key}\n")
+            else:
+                with open(env_path, "w", encoding="utf-8") as f:
+                    f.write(f"GEMINI_API_KEY={new_key}\n")
+        except Exception as e:
+            logger.warning(f"Не удалось записать .env: {e}")
+
+        # прячем ключ в ответе
+        masked = new_key[:6] + "…" + new_key[-4:] if len(new_key) > 12 else "***"
+        await update.message.reply_text(
+            f"Ключ принят и применён.\n"
+            f"Маска: `{masked}`\n"
+            f"Клиент пересоздан. Можно сразу жать /post."
+        )
+        logger.info("Gemini API key updated via /key")
+    except Exception as e:
+        logger.error(f"/key error: {e}")
+        await update.message.reply_text(f"Ошибка при установке ключа:\n{e}")
 
 
 async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -164,8 +224,8 @@ async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     topic = " ".join(context.args) if context.args else None
     await update.message.reply_text("Генерирую обращение Рализма…")
 
-    model = context.bot_data["model"]
-    text = await generate_appeal(model, topic)
+    client = context.bot_data["client"]
+    text = await generate_appeal(client, topic)
 
     try:
         await context.bot.send_message(
@@ -181,8 +241,8 @@ async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def hourly_post(context: ContextTypes.DEFAULT_TYPE):
     """Автопостинг раз в час."""
-    model = context.bot_data["model"]
-    text = await generate_appeal(model)
+    client = context.bot_data["client"]
+    text = await generate_appeal(client)
     try:
         await context.bot.send_message(chat_id=CHANNEL_ID, text=text)
         logger.info("Hourly post sent")
@@ -191,8 +251,9 @@ async def hourly_post(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(app: Application):
-    app.bot_data["model"] = setup_gemini()
-    logger.info("Gemini model ready")
+    app.bot_data["api_key"] = GEMINI_API_KEY
+    app.bot_data["client"] = setup_gemini()
+    logger.info("Gemini client ready (AQ. key support)")
 
 
 def main():
@@ -209,6 +270,7 @@ def main():
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("key", cmd_key))
     app.add_handler(CommandHandler("post", cmd_post))
 
     # JobQueue для почасового постинга
