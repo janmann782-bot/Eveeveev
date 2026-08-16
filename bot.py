@@ -25,10 +25,11 @@ load_dotenv()
 
 # ================== КОНФИГ ==================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "ВСТАВЬ_ТОКЕН_БОТА")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6Iyhb-zWDPaMSKgGzOa0CPBBi85fYgFimkLwdbtUpCp3g")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6I9-SuKztpePtnTqVCtNMFNrzfm1swnDGmoMjcfwQ89LA")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "-1004341947372"))
 ADMIN_ID = int(os.getenv("ADMIN_ID", "7787565361"))
 POST_INTERVAL_HOURS = 1
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 
 # ================== ЛОГИ ==================
 logging.basicConfig(
@@ -100,7 +101,7 @@ async def generate_appeal(client, topic: str | None = None) -> str:
     try:
         response = await asyncio.to_thread(
             client.models.generate_content,
-            model="gemini-2.0-flash",
+            model=GEMINI_MODEL,
             contents=user_prompt,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
