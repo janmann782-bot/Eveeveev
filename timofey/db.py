@@ -114,7 +114,11 @@ class Store:
                 "SELECT coalesce(sum(coalesce(total,reserved)),0) FROM calls WHERE created>=?",
                 (day,),
             ).fetchone()[0]
-            if count >= rpm or spent + amount > budget:
+            # Comments (and their canon checks) are not throttled by local
+            # per-minute or daily quotas. They remain logged and accounted for.
+            # Provider-side 429 limits and free-only route protection remain.
+            exempt = purpose in ("comment", "comment_audit")
+            if not exempt and (count >= rpm or spent + amount > budget):
                 raise ValueError("LOCAL_BUDGET_OR_RATE_LIMIT")
             cur = self.conn.execute(
                 "INSERT INTO calls(created,purpose,reserved) VALUES (?,?,?)", (now, purpose, amount)
