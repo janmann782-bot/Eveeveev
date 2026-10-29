@@ -40,13 +40,15 @@ class FakeModel:
 
     async def generate(self, messages, purpose, **kwargs):
         self.calls.append((messages, purpose))
-        if purpose == "canon_audit":
+        if purpose in ("canon_audit", "comment_audit"):
             return json.dumps(
                 {"ok": not self.conflict, "conflicts": ["conflict"] if self.conflict else []}
             )
         if purpose == "comment":
             return self.text or "Вмешательство."
         request = json.loads(messages[1]["content"])
+        if "Тимофей Рализм в сильном алкогольном опьянении" in request["task"]:
+            return "Блядь, мне только что мост позвонил. Сказал, что его люди забыли воду под ним! Идите нахуй со своими протоколами, я щас лично спасу реку!"
         heading = (
             "Белая горячка Тимофея Рализма"
             if "Белая горячка" in request["task"]
