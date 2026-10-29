@@ -107,11 +107,14 @@ class Store:
         day = now - now % 86400
         self.conn.execute("BEGIN IMMEDIATE")
         try:
+            # Comment traffic never consumes the local news quota.
             count = self.conn.execute(
-                "SELECT count(*) FROM calls WHERE created>?", (now - 60,)
+                "SELECT count(*) FROM calls WHERE created>? AND purpose NOT IN ('comment','comment_audit')",
+                (now - 60,),
             ).fetchone()[0]
             spent = self.conn.execute(
-                "SELECT coalesce(sum(coalesce(total,reserved)),0) FROM calls WHERE created>=?",
+                "SELECT coalesce(sum(coalesce(total,reserved)),0) FROM calls "
+                "WHERE created>=? AND purpose NOT IN ('comment','comment_audit')",
                 (day,),
             ).fetchone()[0]
             # Comments (and their canon checks) are not throttled by local
