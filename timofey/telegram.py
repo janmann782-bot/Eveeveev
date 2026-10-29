@@ -95,6 +95,8 @@ HELP = """Панель Тимофея
 /memory ID - память гражданина
 /forget ID - удалить память гражданина
 /lore ЗАГОЛОВОК | ТЕКСТ - добавить подтвержденный лор
+/lorestats - число фрагментов канона в запущенном боте
+/lorecheck ЗАПРОС - какие статьи найдены по теме
 Или отправь UTF-8 .txt/.md до 100 КБ в личку
 /usage - расход токенов и резервы
 /key НОВЫЙ_КЛЮЧ - сменить ключ в окружении текущего процесса
@@ -238,6 +240,33 @@ def build_router(service):
                     raise ValueError()
                 service.desk.kb.add(title.strip(), text.strip())
                 await message.answer("Подтвержденный лор добавлен в поиск")
+            elif name == "lorestats":
+                chunks = store.conn.execute("SELECT count(*) FROM canon").fetchone()[0]
+                titles = store.conn.execute("SELECT count(DISTINCT title) FROM canon").fetchone()[0]
+                sor = store.conn.execute(
+                    "SELECT count(*) FROM canon WHERE title='СОР'"
+                ).fetchone()[0]
+                await message.answer(
+                    f"Фрагментов канона: {chunks}\n"
+                    f"Разных заголовков: {titles}\n"
+                    f"Статья СОР: {sor} фрагментов\n"
+                    "Сведения берутся из базы работающего бота"
+                )
+            elif name == "lorecheck":
+                query = args.strip().strip('"“”')
+                if not 2 <= len(query) <= 200:
+                    raise ValueError()
+                matches = service.desk.kb.context(query, priority_query=query)
+                if not matches:
+                    await message.answer("Канон по запросу не найден")
+                else:
+                    excerpts = [
+                        item["title"] + ": " + item["text"][:180].replace("\n", " ")
+                        for item in matches[:8]
+                    ]
+                    await message.answer(
+                        "Найденные фрагменты:\n" + "\n\n".join(excerpts)
+                    )
             elif name == "usage":
                 row = store.conn.execute(
                     "SELECT count(*),coalesce(sum(prompt),0),coalesce(sum(completion),0),coalesce(sum(total),0),coalesce(sum(CASE WHEN total IS NULL THEN reserved ELSE 0 END),0) FROM calls"
@@ -278,7 +307,7 @@ def build_router(service):
                 service.stop_event.set()
             elif name == "status":
                 await message.answer(
-                    f"Канал: {config.channel_id}\nЧат: {config.discussion_id}\nВладелец: {config.owner_id}\nПауза: {not service.enabled()}\nАвтопост: {store.get('autopost', False)}\nРежим: {store.get('mode', 'manual')}\nИнтервал: {store.get('interval', config.interval_minutes)} мин\nОтветы: без локальных задержек и случайного пропуска\nМодель: {config.model}\nГенератор новостей: plain-v2\nСпецрежим: delirium-v3, /NT\nПроверка комментариев: canon-v2",
+                    f"Канал: {config.channel_id}\nЧат: {config.discussion_id}\nВладелец: {config.owner_id}\nПауза: {not service.enabled()}\nАвтопост: {store.get('autopost', False)}\nРежим: {store.get('mode', 'manual')}\nИнтервал: {store.get('interval', config.interval_minutes)} мин\nОтветы: без локальных задержек и случайного пропуска\nМодель: {config.model}\nГенератор новостей: plain-v2\nСпецрежим: delirium-v3, /NT\nПроверка комментариев: canon-v2\nПоиск лора: cross-country-v2",
                     reply_markup=panel(),
                 )
             else:
