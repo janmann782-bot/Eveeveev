@@ -41,7 +41,8 @@ async def test_normal_and_special(store, kb, config):
     assert store.event(eid)["kind"] == "new"
     assert store.event(eid)["state"] == "draft"
     sid = await desk.generate("delirium")
-    assert "Белая горячка Тимофея Рализма" in store.event(sid)["body"]
+    assert "Белая горячка Тимофея Рализма" not in store.event(sid)["body"]
+    assert store.event(sid)["body"].startswith("Блядь")
     assert json.loads(store.event(sid)["payload"])["story_status"] == "closed"
 
 
@@ -189,7 +190,7 @@ def test_config_no_secret_repr(config):
     assert config.api_key not in repr(config)
     assert config.bot_token not in repr(config)
     with pytest.raises(ValueError):
-        Config(model="openai/not-permitted")
+        Config(model="bad model id")
 
 
 async def test_edit_locks_publication(store, kb, config):
