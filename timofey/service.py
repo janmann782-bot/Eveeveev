@@ -16,23 +16,26 @@ class Service:
     def enabled(self):
         return not self.store.get("paused", False)
 
-    async def generate(self, forced=None):
+    async def generate(self, forced=None, topic_request=None):
         if not self.enabled():
             raise ModelError("BOT_PAUSED")
         if self.work.locked():
             raise ModelError("BUSY_TRY_LATER")
         async with self.work:
-            return await self.desk.generate(forced)
+            return await self.desk.generate(forced, topic_request=topic_request)
 
     async def edit(self, event_id, text):
         from .news import validate_text
 
-        validate_text(text, (self.config.api_key, self.config.bot_token))
         row = self.store.event(event_id)
         if not row or row["state"] != "draft":
             raise ModelError("NOT_EDITABLE")
-        if row["kind"] == "delirium" and "Белая горячка Тимофея Рализма" not in text.split("\n")[0]:
-            raise ModelError("SPECIAL_HEADING_MISSING")
+        if row["kind"] != "delirium":
+            validate_text(text, (self.config.api_key, self.config.bot_token))
+        if row["kind"] == "delirium":
+            from .news import validate_delirium
+
+            validate_delirium(text, (self.config.api_key, self.config.bot_token))
         # An in-flight edit cannot be published with the old content by another update.
         changed = self.store.conn.execute(
             "UPDATE events SET state='editing' WHERE id=? AND state='draft'", (event_id,)
@@ -40,7 +43,10 @@ class Service:
         if not changed:
             raise ModelError("NOT_EDITABLE")
         try:
-            await self.desk.audit(text, row["location"] + " " + row["topic"])
+            await self.desk.audit(
+                text, row["location"] + " " + row["topic"],
+                for_comment=row["kind"] == "delirium",
+            )
             data = json.loads(row["payload"])
             data["text"] = text
             self.store.conn.execute(
