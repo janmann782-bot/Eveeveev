@@ -17,7 +17,7 @@ class ReplyModel:
         if purpose == "comment":
             self.comments += 1
             return "Ложь." if self.comments == 1 else "Несогласен."
-        if purpose == "canon_audit":
+        if purpose in ("canon_audit", "comment_audit"):
             self.audits += 1
             self.policies.append(messages[0]["content"])
             reject = self.audits <= self.rejects
