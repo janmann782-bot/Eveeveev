@@ -7,6 +7,8 @@ from decimal import Decimal, InvalidOperation
 
 import httpx
 
+from .config import valid_model_id
+
 
 class ModelError(Exception):
     """Public error codes contain no provider response or credentials."""
@@ -36,8 +38,8 @@ class MiniMax:
             self.blocked_until = 0
 
     async def change_model(self, model):
-        if not model.startswith("minimax/") or len(model) > 150 or any(c.isspace() for c in model):
-            raise ModelError("MINIMAX_MODEL_REQUIRED")
+        if not valid_model_id(model):
+            raise ModelError("INVALID_MODEL_ID")
         async with self.lock:
             try:
                 response = await self.client.get(self.BASE + "/models")
@@ -49,7 +51,7 @@ class MiniMax:
                 raise ModelError("MODEL_NOT_IN_CATALOG")
             self.config.model = model
             self.catalog_at = 0
-            os.environ["MINIMAX_MODEL"] = model
+            os.environ["AI_MODEL"] = model
             self.store.set("model", model)
             self.failures = 0
             self.blocked_until = 0
@@ -63,7 +65,7 @@ class MiniMax:
             r.raise_for_status()
             item = next((m for m in r.json()["data"] if m["id"] == self.config.model), None)
             if not item:
-                raise ModelError("NO_VERIFIED_FREE_MINIMAX_ROUTE")
+                raise ModelError("NO_VERIFIED_FREE_MODEL_ROUTE")
             if item.get("access_tier") != "free":
                 raise ModelError("PAID_ROUTE_BLOCKED")
             prices = item.get("pricing", {})
