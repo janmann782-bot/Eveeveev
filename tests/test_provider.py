@@ -20,7 +20,7 @@ async def test_provider_format_usage_and_secrets(store, config):
             return httpx.Response(200, json=catalog(config))
         assert request.headers["Authorization"] == "Bearer " + config.api_key
         body = json.loads(request.content)
-        assert body["model"].startswith("minimax/")
+        assert body["model"] == config.model
         assert "test-only" not in json.dumps(body)
         return httpx.Response(
             200,
@@ -70,8 +70,8 @@ async def test_outage_no_leak(store, config):
 
 async def test_key_and_model_change(store, config, monkeypatch):
     monkeypatch.delenv("XKIRO_API_KEY", raising=False)
-    monkeypatch.delenv("MINIMAX_MODEL", raising=False)
-    free_model = "minimax/test-free"
+    monkeypatch.delenv("AI_MODEL", raising=False)
+    free_model = "mistralai/mistral-large-2512"
 
     def handler(request):
         return httpx.Response(
@@ -91,8 +91,12 @@ async def test_key_and_model_change(store, config, monkeypatch):
     ).fetchall()
     await model.change_model(free_model)
     assert store.get("model") == free_model
-    with pytest.raises(ModelError):
+    assert config.model == free_model
+    assert await model.free_route() is None
+    with pytest.raises(ModelError, match="MODEL_NOT_IN_CATALOG"):
         await model.change_model("minimax/paid-test")
+    with pytest.raises(ModelError, match="INVALID_MODEL_ID"):
+        await model.change_model("model-without-provider")
     assert config.model == free_model
     await model.close()
 
@@ -134,4 +138,20 @@ async def test_retry_is_bounded_and_body_identical(store, config, monkeypatch):
         await model.generate([{"role": "user", "content": "Вопрос"}], "test")
     assert len(requests) == 3 and len(set(requests)) == 1
     assert store.conn.execute("SELECT count(*) FROM calls").fetchone()[0] == 1
+    await model.close()
+
+
+async def test_change_to_free_mistral_allows_generation(store, config):
+    free_id = "mistralai/mistral-large-2512"
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": free_id, "access_tier": "free", "pricing": {"input": 0, "output": 0}}]})
+        assert json.loads(request.content)["model"] == free_id
+        return httpx.Response(200, json={"model": free_id, "choices": [{"message": {"content": "Кефирский выпуск"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}})
+
+    config.model = "minimax/minimax-m3.1-flash"
+    model = MiniMax(config, store, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert await model.change_model(free_id) == "free"
+    assert await model.generate([{"role": "user", "content": "test"}], "news") == "Кефирский выпуск"
     await model.close()
