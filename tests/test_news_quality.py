@@ -31,7 +31,7 @@ class FakeEditorialModel:
         self.news_messages = []
 
     async def generate(self, messages, purpose, **kwargs):
-        if purpose == "canon_audit":
+        if purpose in ("canon_audit", "comment_audit"):
             candidate = json.loads(messages[1]["content"])["candidate"]
             ok = "24 тонны" not in candidate
             return json.dumps({"ok": ok, "conflicts": [] if ok else ["Невозможный рекорд"]})
@@ -118,7 +118,7 @@ def test_extract_news_refuses_empty_or_malformed_post(raw, code):
 
 class PlainEditorialModel(FakeEditorialModel):
     async def generate(self, messages, purpose, **kwargs):
-        if purpose == "canon_audit":
+        if purpose in ("canon_audit", "comment_audit"):
             return json.dumps({"ok": True, "conflicts": []})
         assert purpose == "news"
         assert not kwargs.get("json_mode")
