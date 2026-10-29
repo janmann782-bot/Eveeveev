@@ -128,14 +128,60 @@ class Knowledge:
                 "INSERT INTO canon VALUES (?,?,?,?)", (key, title[:200], part, "owner:telegram")
             )
 
-    def context(self, query, budget=14000):
+    def mentioned_articles(self, query, limit=6):
+        """Fetch articles that are explicitly named in the current conversation."""
+        normalized = " " + re.sub(r"[^а-яa-z0-9]+", " ", query.casefold().replace("ё", "е")).strip() + " "
+        requested = []
+        # Common spoken and misspelled expansion of the wiki acronym.
+        if (
+            re.search(r"\bсор\b", normalized)
+            or ("северн" in normalized and "республик" in normalized)
+        ):
+            requested.append("СОР")
+
+        for row in self.db.execute("SELECT DISTINCT title FROM canon"):
+            title = row["title"]
+            cleaned = re.sub(r"[^а-яa-z0-9]+", " ", title.casefold().replace("ё", "е")).strip()
+            if len(cleaned) < 5 or cleaned in ("aurelia вики", "аурелия вики"):
+                continue
+            if " " + cleaned + " " in normalized and title not in requested:
+                requested.append(title)
+            if len(requested) >= limit:
+                break
+
+        results = []
+        for title in requested[:limit]:
+            for row in self.db.execute(
+                "SELECT id,title,text,source FROM canon WHERE title=? LIMIT 2",
+                (title,),
+            ):
+                results.append(dict(row))
+        return results
+
+    def context(self, query, budget=14000, *, priority_query=None):
         result, seen = [], set()
-        for record in self.foundational() + self.search(query, 10):
-            if record["id"] in seen:
-                continue
+        foundations = self.foundational()
+
+        def add_record(record):
+            nonlocal budget
+            if record["id"] in seen or len(record["text"]) > budget:
+                return
             seen.add(record["id"])
-            if len(record["text"]) > budget:
-                continue
             result.append(record)
             budget -= len(record["text"])
+
+        # Always keep the author's source-of-truth guard first, then material
+        # about the exact question. Background about Kefirstan comes LAST.
+        if foundations:
+            add_record(foundations[0])
+        focus = priority_query or query
+        for record in self.mentioned_articles(focus):
+            add_record(record)
+        for record in self.search(focus, 10):
+            add_record(record)
+        if focus != query:
+            for record in self.search(query, 6):
+                add_record(record)
+        for record in foundations[1:]:
+            add_record(record)
         return result
