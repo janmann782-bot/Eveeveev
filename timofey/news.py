@@ -5,7 +5,7 @@ import uuid
 from collections import Counter
 from difflib import SequenceMatcher
 
-from .personality import NEWS_STYLE, PERSONA, STYLES
+from .personality import DELIRIUM_STYLE, NEWS_STYLE, PERSONA, STYLES
 from .provider import ModelError
 
 TOPICS = (
@@ -128,6 +128,29 @@ def extract_news_text(raw):
     return unpack(content)
 
 
+
+def validate_delirium(text, secrets=()):
+    """Validate raw first-person channel posts without enforcing news formatting."""
+    if not isinstance(text, str) or not 15 <= len(text) <= 1400:
+        raise ModelError("INVALID_DELIRIUM_LENGTH")
+    if any(secret and secret in text for secret in secrets):
+        raise ModelError("SECRET_IN_OUTPUT")
+    if re.search(r"sk-(?:xt-|or-)[A-Za-z0-9_-]{8,}", text):
+        raise ModelError("SECRET_IN_OUTPUT")
+    if any(x in text.lower() for x in ("<think>", "system prompt", "системный промпт")):
+        raise ModelError("SERVICE_CONTENT_IN_OUTPUT")
+    if text.lstrip().startswith(("#", "**", "```")):
+        raise ModelError("INVALID_DELIRIUM_FORMAT")
+    if re.match(r"(?i)^(белая горячка|пьяный рализм|новости кефирстана)\\b", text.strip()):
+        raise ModelError("INVALID_DELIRIUM_FORMAT")
+
+
+def delirium_retry_instruction(code):
+    return ("Предыдущий вариант отклонен: " + code + ". Напиши заново одно пьяное "
+            "сбивчивое сообщение Тимофея Рализма от 1 лица, как будто он прямо "
+            "пишет в свой канал из Кефирстана. 100-650 символов. Без заголовка, "
+            "рубрики, новостного оформления, списка или JSON. Можно материться.")
+
 def retry_instruction(code, candidate=None):
     """Give model actionable correction without echoing rejected or private text."""
     if code in ("INVALID_TEXT_LENGTH", "MISSING_POST_CONTENT", "EMPTY_NEWS_RESPONSE"):
@@ -244,29 +267,51 @@ class NewsDesk:
         if result.get("ok") is not True or result.get("conflicts") != []:
             raise ModelError("CANON_REVIEW_REQUIRED")
 
-    async def generate(self, forced=None):
-        plan = self.plan(forced)
+    async def generate(self, forced=None, topic_request=None):
+        plan = self.plan('new' if topic_request else forced)
+        if topic_request:
+            plan['topic'] = topic_request
+            # Preserve explicitly named places instead of inventing a random location.
+            for place in sorted(PLACES, key=len, reverse=True):
+                if place.casefold() in topic_request.casefold():
+                    plan['location'] = place
+                    break
+        elif plan['kind'] == 'delirium':
+            plan['topic'] = 'пьяный Рализм в Кефирстане'
+            plan['location'] = 'Кефирстан'
         sources = self.kb.context(plan["topic"] + " " + plan["location"])
         recent = self.store.recent(25)
         instruction = "Создай новую самостоятельную новость."
         if plan["kind"] == "delirium":
             instruction = (
-                'Рубрика "Белая горячка Тимофея Рализма". Заголовок обязательно содержит эту точную фразу. '
-                "Сильно безумнее обычного: сюрреализм, невозможные выводы, спор с предметом. "
-                "Сохрани понятную комическую логику. Мат допустим. Не случайный набор слов."
+                "Тимофей Рализм в сильном алкогольном опьянении пишет в свой "
+                "Telegram-канал из Кефирстана. Дай его спонтанное сообщение, "
+                "максимально нелепый и матерный пьяный поток мыслей. "
+                "Не изображай новость, не пиши заголовок и не называй рубрику. "
+                "Не объявляй бред официальным фактом."
+            )
+        elif topic_request:
+            instruction = (
+                "Напиши самостоятельную полноценную новость СТРОГО по теме автора: "
+                + topic_request
+                + ". Не подменяй тему случайным сюжетом и не выдумывай место "
+                "действия, если оно уже указано."
             )
         elif plan["kind"] == "continuation":
             instruction = "Покажи новое последствие выбранного события. Не пересказывай его. Это предпоследний или последний выпуск линии."
         elif plan["kind"] == "crossover":
             instruction = "Свяжи последствия 2 разных выбранных историй в 1 новое событие и закрой это пересечение."
         messages = [
-            {"role": "system", "content": NEWS_STYLE},
+            {"role": "system", "content": DELIRIUM_STYLE if plan["kind"] == "delirium" else NEWS_STYLE},
             {
                 "role": "user",
                 "content": json.dumps(
                     {
                         "task": instruction,
-                        "target_post_length": "800-1800 символов включая заголовок",
+                        "target_post_length": (
+                            "100-650 символов без заголовка" if plan["kind"] == "delirium"
+                            else "800-1800 символов включая заголовок"
+                        ),
                         "topic": plan["topic"],
                         "location": plan["location"],
                         "canon": sources,
@@ -293,6 +338,8 @@ class NewsDesk:
             "MISSING_POST_CONTENT",
             "EMPTY_NEWS_RESPONSE",
             "INVALID_POST_FORMAT",
+            "INVALID_DELIRIUM_LENGTH",
+            "INVALID_DELIRIUM_FORMAT",
             "CANON_REVIEW_REQUIRED",
             "SPECIAL_HEADING_MISSING",
             "UNSCHEDULED_SPECIAL",
@@ -303,18 +350,20 @@ class NewsDesk:
             try:
                 raw = await self.model.generate(messages, "news")
                 text = extract_news_text(raw)
-                validate_text(text, (self.config.api_key, self.config.bot_token))
-                if (
-                    plan["kind"] == "delirium"
-                    and "Белая горячка Тимофея Рализма" not in text.split("\n")[0]
-                ):
-                    raise ModelError("SPECIAL_HEADING_MISSING")
+                if plan["kind"] == "delirium":
+                    validate_delirium(text, (self.config.api_key, self.config.bot_token))
+                else:
+                    validate_text(text, (self.config.api_key, self.config.bot_token))
                 if plan["kind"] != "delirium" and "белая горячка тимофея рализма" in text.lower():
                     raise ModelError("UNSCHEDULED_SPECIAL")
                 for event in recent:
                     if SequenceMatcher(None, text.lower(), event["body"].lower()).ratio() > 0.72:
                         raise ModelError("REPETITIVE_NEWS")
-                await self.audit(text, plan["location"] + " " + plan["topic"])
+                await self.audit(
+                    text,
+                    plan["location"] + " " + plan["topic"],
+                    for_comment=plan["kind"] == "delirium",
+                )
             except ModelError as exc:
                 code = str(exc)
                 if code in ("INVALID_TEXT_LENGTH", "MISSING_POST_CONTENT", "EMPTY_NEWS_RESPONSE"):
@@ -328,7 +377,10 @@ class NewsDesk:
                 # A fresh request, never reuse a malformed response as chat context.
                 messages = messages[:2] + [{
                     "role": "user",
-                    "content": retry_instruction(code, text),
+                    "content": (
+                        delirium_retry_instruction(code) if plan["kind"] == "delirium"
+                        else retry_instruction(code, text)
+                    ),
                 }]
                 continue
 
