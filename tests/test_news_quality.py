@@ -79,3 +79,51 @@ async def test_two_malformed_attempts_do_not_leave_draft(store, config, kb):
         await NewsDesk(store, kb, model, config).generate("new")
     assert model.news_attempts == 2
     assert store.conn.execute("SELECT count(*) FROM events").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "candidate,expected",
+    [
+        ("", "отсутствует или пустое"),
+        (None, "отсутствует или пустое"),
+        ("Коротко", "слишком короткий"),
+        ("А" * 4000, "слишком длинный"),
+    ],
+)
+def test_size_specific_retry_instruction(candidate, expected):
+    from timofey.news import retry_instruction
+
+    result = retry_instruction("INVALID_TEXT_LENGTH", candidate)
+    assert expected in result
+    assert "А" * 100 not in result
+
+
+async def test_short_post_regenerates_with_length_feedback(store, config, kb):
+    model = FakeEditorialModel([
+        "Коротко",
+        "Городская комиссия опубликовала протокол\n\nВ Каменном Мосте обнаружили, что чиновники согласовали перенос открытия без выбора даты. Теперь дата обязана явиться лично",
+    ])
+    event_id = await NewsDesk(store, kb, model, config).generate("new")
+    assert model.news_attempts == 2
+    assert "слишком короткий" in model.news_messages[1][-1]["content"]
+    assert store.event(event_id)["state"] == "draft"
+
+
+async def test_overlong_post_regenerates_without_truncation(store, config, kb):
+    model = FakeEditorialModel([
+        "Слишком длинный материал\n\n" + "В комиссии согласовали документ. " * 140,
+        "Решение комиссии отправлено на доработку\n\nКомиссия постановила рассмотреть заявление через 2 дня. Печать на документе оказалась больше самого документа",
+    ])
+    event_id = await NewsDesk(store, kb, model, config).generate("new")
+    assert model.news_attempts == 2
+    assert "слишком длинный" in model.news_messages[1][-1]["content"]
+    assert len(store.event(event_id)["body"]) < 3800
+    assert store.conn.execute("SELECT count(*) FROM errors WHERE code='TOO_LONG'").fetchone()[0] == 1
+
+
+async def test_three_invalid_length_attempts_never_make_draft(store, config, kb):
+    model = FakeEditorialModel(["Пост"])
+    with pytest.raises(ModelError, match="INVALID_TEXT_LENGTH"):
+        await NewsDesk(store, kb, model, config).generate("new")
+    assert model.news_attempts == 3
+    assert store.conn.execute("SELECT count(*) FROM events").fetchone()[0] == 0
