@@ -98,7 +98,7 @@ HELP = """Панель Тимофея
 Или отправь UTF-8 .txt/.md до 100 КБ в личку
 /usage - расход токенов и резервы
 /key НОВЫЙ_КЛЮЧ - сменить ключ в окружении текущего процесса
-/model ID_МОДЕЛИ - проверить и сменить MiniMax
+/model ID_МОДЕЛИ - проверить и сменить модель xKiro
 /errors - журнал ошибок
 /uncertain - спорная доставка
 /reconcile ID MESSAGE_ID - отметить публикацию после проверки канала
@@ -169,7 +169,7 @@ def build_router(service):
                     tier = await service.desk.model.change_model(args.strip())
                     text = "Модель найдена и сохранена: " + config.model
                     if tier != "free":
-                        text += "\nКаталог помечает ее платной. Генерация заблокирована до подтверждения безопасного расходования подарочного пакета"
+                        text += "\nКаталог помечает ее платной. Генерация заблокирована, чтобы не списывать деньги"
                     await message.answer(text)
             elif name in ("start", "admin", "help"):
                 await message.answer(HELP, reply_markup=panel())
