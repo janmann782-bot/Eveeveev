@@ -4,7 +4,7 @@ import logging
 import os
 from pathlib import Path
 
-from .config import Config
+from .config import Config, valid_model_id
 from .db import Store
 from .knowledge import Knowledge, import_xml
 from .lock import InstanceLock
@@ -34,7 +34,7 @@ async def run():
     try:
         config = await resolve_chats(bot, config)
         saved_model = store.get("model")
-        if saved_model and saved_model.startswith("minimax/"):
+        if saved_model and valid_model_id(saved_model):
             config.model = saved_model
         kb = Knowledge(store)
         kb.load(config.knowledge_file)
@@ -98,7 +98,7 @@ def main():
         print(f"Canon chunks: {store.conn.execute('SELECT count(*) FROM canon').fetchone()[0]}")
         print("BOT_TOKEN:", "set" if config.bot_token else "missing")
         print("XKIRO_API_KEY:", "set" if config.api_key else "missing")
-        print("MiniMax:", config.model)
+        print("AI model:", config.model)
         print("Check is offline. No Telegram or model requests were made.")
         store.close()
         return
