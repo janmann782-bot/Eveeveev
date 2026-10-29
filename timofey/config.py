@@ -1,11 +1,15 @@
 import os
 import re
+from dataclasses import dataclass, field
+from pathlib import Path
 
 
 def valid_model_id(model):
-    return bool(isinstance(model, str) and len(model) <= 150 and re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._:-]+", model))
-from dataclasses import dataclass, field
-from pathlib import Path
+    return bool(
+        isinstance(model, str)
+        and len(model) <= 150
+        and re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._:-]+", model)
+    )
 
 
 @dataclass
