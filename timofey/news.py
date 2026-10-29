@@ -209,34 +209,34 @@ class NewsDesk:
                 data = parse_object(
                     await self.model.generate(messages, "news", json_mode=True)
                 )
-            text = data.get("text")
-            validate_text(text, (self.config.api_key, self.config.bot_token))
-            if (
-                plan["kind"] == "delirium"
-                and "Белая горячка Тимофея Рализма" not in text.split("\n")[0]
-            ):
-                raise ModelError("SPECIAL_HEADING_MISSING")
-            if plan["kind"] != "delirium" and "белая горячка тимофея рализма" in text.lower():
-                raise ModelError("UNSCHEDULED_SPECIAL")
-            for key in ("organizations", "characters"):
+                text = data.get("text")
+                validate_text(text, (self.config.api_key, self.config.bot_token))
                 if (
-                    not isinstance(data.get(key), list)
-                    or len(data[key]) > 20
-                    or any(not isinstance(v, str) or len(v) > 200 for v in data[key])
+                    plan["kind"] == "delirium"
+                    and "Белая горячка Тимофея Рализма" not in text.split("\n")[0]
                 ):
-                    raise ModelError("INVALID_EVENT_METADATA")
-            if data.get("story_status") not in ("open", "closed") or not isinstance(
-                data.get("consequences"), str
-            ):
-                raise ModelError("INVALID_STORY_METADATA")
-            for event in recent:
-                if SequenceMatcher(None, text.lower(), event["body"].lower()).ratio() > 0.72:
-                    raise ModelError("REPETITIVE_NEWS")
-            if plan["kind"] in ("crossover", "delirium") or plan["depth"] >= 2:
-                data["story_status"] = "closed"
-            data["related_events"] = [r["id"] for r in plan["parents"]]
-            data["canon_sources"] = [r["id"] for r in sources]
-            await self.audit(text, plan["location"] + " " + plan["topic"])
+                    raise ModelError("SPECIAL_HEADING_MISSING")
+                if plan["kind"] != "delirium" and "белая горячка тимофея рализма" in text.lower():
+                    raise ModelError("UNSCHEDULED_SPECIAL")
+                for key in ("organizations", "characters"):
+                    if (
+                        not isinstance(data.get(key), list)
+                        or len(data[key]) > 20
+                        or any(not isinstance(v, str) or len(v) > 200 for v in data[key])
+                    ):
+                        raise ModelError("INVALID_EVENT_METADATA")
+                if data.get("story_status") not in ("open", "closed") or not isinstance(
+                    data.get("consequences"), str
+                ):
+                    raise ModelError("INVALID_STORY_METADATA")
+                for event in recent:
+                    if SequenceMatcher(None, text.lower(), event["body"].lower()).ratio() > 0.72:
+                        raise ModelError("REPETITIVE_NEWS")
+                if plan["kind"] in ("crossover", "delirium") or plan["depth"] >= 2:
+                    data["story_status"] = "closed"
+                data["related_events"] = [r["id"] for r in plan["parents"]]
+                data["canon_sources"] = [r["id"] for r in sources]
+                await self.audit(text, plan["location"] + " " + plan["topic"])
             except ModelError as exc:
                 if attempt != 0 or str(exc) not in retryable:
                     raise
