@@ -57,3 +57,28 @@ def test_owner_lore_survives_corpus_update(store, kb, tmp_path):
     kb.load(modified)
     rows = store.conn.execute("SELECT text FROM canon WHERE source='owner:telegram'").fetchall()
     assert rows and "Пробный факт" in rows[0][0]
+
+
+def test_sor_spelling_variant_finds_named_article(store, kb):
+    kb.add(
+        "СОР",
+        "Северные Объединенные Республики - отдельное государство Аурелии, не САР Кефирстан",
+    )
+    query = "Что такое Северные Объеденные Республики"
+    selected = kb.mentioned_articles(query)
+    assert selected
+    assert selected[0]["title"] == "СОР"
+    context = kb.context("Случайный текст о Кефирстане", priority_query=query)
+    assert any(item["title"] == "СОР" for item in context)
+    assert sum(len(item["text"]) for item in context) <= 14000
+
+
+def test_specific_other_country_is_preferred_over_fixed_kefirstan_anchors(store, kb):
+    kb.add("Фалк Вейсман", "Фалк Вейсман - отдельный персонаж, не Тимофей Рализм")
+    results = kb.context(
+        "Кефирстан Рализм ЛПК",
+        priority_query="Кто такой Фалк Вейсман?",
+    )
+    assert results[0]["title"] == "Подтвержденные автором ориентиры Аурелии"
+    assert results[1]["title"] == "Фалк Вейсман"
+    assert sum(len(item["text"]) for item in results) <= 14000
