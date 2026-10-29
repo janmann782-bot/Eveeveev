@@ -1,4 +1,9 @@
 import os
+import re
+
+
+def valid_model_id(model):
+    return bool(isinstance(model, str) and len(model) <= 150 and re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._:-]+", model))
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -12,7 +17,7 @@ class Config:
     discussion_id: int = 0
     channel_username: str = "@SAR_Kefirstan"
     discussion_username: str = "@Kefirstano"
-    model: str = "minimax/minimax-m3.1-flash"
+    model: str = "mistralai/mistral-large-2512"
     data_dir: Path = Path("runtime")
     knowledge_file: Path = Path("knowledge/canon.jsonl")
     max_output_tokens: int = 1800
@@ -30,8 +35,8 @@ class Config:
             raise ValueError("Invalid numeric Telegram IDs")
         if self.channel_id and self.channel_id == self.discussion_id:
             raise ValueError("Channel and discussion must differ")
-        if not self.model.startswith("minimax/"):
-            raise ValueError("Only MiniMax through xKiro is allowed")
+        if not valid_model_id(self.model):
+            raise ValueError("AI_MODEL must be a full xKiro model ID")
         if not 0 <= self.reply_probability <= 1:
             raise ValueError("REPLY_PROBABILITY must be 0..1")
         if not 128 <= self.max_output_tokens <= 4096:
@@ -61,7 +66,6 @@ class Config:
             "discussion_id": ("DISCUSSION_ID", int),
             "channel_username": ("CHANNEL_USERNAME", str),
             "discussion_username": ("DISCUSSION_USERNAME", str),
-            "model": ("MINIMAX_MODEL", str),
             "data_dir": ("DATA_DIR", Path),
             "knowledge_file": ("KNOWLEDGE_FILE", Path),
             "max_output_tokens": ("MAX_OUTPUT_TOKENS", int),
@@ -74,6 +78,8 @@ class Config:
             "reply_probability": ("REPLY_PROBABILITY", float),
             "interval_minutes": ("POST_INTERVAL_MINUTES", int),
         }
-        return cls(
-            **{k: cast(os.environ[n]) for k, (n, cast) in fields.items() if os.environ.get(n)}
-        )
+        values = {k: cast(os.environ[n]) for k, (n, cast) in fields.items() if os.environ.get(n)}
+        model = os.environ.get("AI_MODEL") or os.environ.get("MINIMAX_MODEL")
+        if model:
+            values["model"] = model
+        return cls(**values)
