@@ -84,7 +84,9 @@ class MiniMax:
         if not self.config.api_key:
             raise ModelError("XKIRO_API_KEY_MISSING")
         async with self.lock:
-            if time.time() < self.blocked_until:
+            # Comments have no local circuit cooldown; provider rate limits
+            # still apply and are handled through normal HTTP retry rules.
+            if purpose not in ("comment", "comment_audit") and time.time() < self.blocked_until:
                 raise ModelError("CIRCUIT_OPEN")
             await self.free_route()
 
@@ -180,7 +182,7 @@ class MiniMax:
                     if not settled:
                         self.store.settle(call_id)
                     self.failures += 1
-                    if self.failures >= 3:
+                    if self.failures >= 3 and purpose not in ("comment", "comment_audit"):
                         self.blocked_until = time.time() + 300
                     code = str(exc) if isinstance(exc, ModelError) else "PROVIDER_UNAVAILABLE"
                     self.store.error("xkiro", code)
