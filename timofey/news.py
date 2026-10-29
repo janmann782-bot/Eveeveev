@@ -405,7 +405,18 @@ class NewsDesk:
 
     async def reply(self, user_id, text, context, style=None):
         style = self.rng.randrange(len(STYLES)) if style is None else style
-        facts = self.kb.context(text + " " + context[-2000:])
+        history = self.store.history(user_id, self.config.memory_messages)
+        # Follow-up questions can omit a country name. Use the last questions
+        # from this SAME citizen to recover the relevant Aurelia article.
+        recent_questions = " ".join(
+            item["body"][:300]
+            for item in history[-8:]
+            if item["role"] == "user"
+        )
+        focus = (text + " " + recent_questions[-1300:]).strip()
+        facts = self.kb.context(
+            focus + " " + context[-1200:], priority_query=focus
+        )
         messages = [
             {
                 "role": "system",
@@ -417,9 +428,7 @@ class NewsDesk:
                     {
                         "canon": facts,
                         "channel_context_not_canon": context[:6000],
-                        "this_citizen_memory": self.store.history(
-                            user_id, self.config.memory_messages
-                        ),
+                        "this_citizen_memory": history,
                         "current_comment": text[:2000],
                     },
                     ensure_ascii=False,
