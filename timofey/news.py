@@ -267,8 +267,6 @@ class NewsDesk:
             "CANON_REVIEW_REQUIRED",
             "SPECIAL_HEADING_MISSING",
             "UNSCHEDULED_SPECIAL",
-            "INVALID_EVENT_METADATA",
-            "INVALID_STORY_METADATA",
             "REPETITIVE_NEWS",
         }
         for attempt in range(3):
