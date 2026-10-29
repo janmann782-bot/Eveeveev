@@ -1,6 +1,5 @@
 import io
 import json
-import random
 import time
 from dataclasses import replace
 
@@ -83,6 +82,7 @@ class Access(BaseMiddleware):
 
 HELP = """Панель Тимофея
 /news - новая новость
+/NT "тема" - отдельная новость по своей теме
 /delirium - Белая горячка
 /drafts - черновики
 /preview ID - предпросмотр
@@ -91,7 +91,7 @@ HELP = """Панель Тимофея
 /autopost on|off - расписание
 /mode manual|automatic - режим (по умолчанию manual)
 /interval МИНУТЫ - интервал от 10 до 10080
-/probability 0..1 - шанс ответа
+/probability - устарела, на комментарии теперь отвечаем без случайного пропуска
 /memory ID - память гражданина
 /forget ID - удалить память гражданина
 /lore ЗАГОЛОВОК | ТЕКСТ - добавить подтвержденный лор
@@ -173,9 +173,23 @@ def build_router(service):
                     await message.answer(text)
             elif name in ("start", "admin", "help"):
                 await message.answer(HELP, reply_markup=panel())
-            elif name in ("news", "delirium"):
+            elif name in ("news", "delirium", "nt"):
+                topic_request = None
+                if name == "nt":
+                    topic_request = args.strip()
+                    if (len(topic_request) >= 2 and
+                        (topic_request[0], topic_request[-1]) in
+                        (('"', '"'), ("“", "”"), ("'", "'"))):
+                        topic_request = topic_request[1:-1].strip()
+                    if not 3 <= len(topic_request) <= 200 or any(
+                        ch in topic_request for ch in ("\\n", "\\r")
+                    ):
+                        raise ValueError()
                 await message.answer("Генерация и проверка канона...")
-                event_id = await service.generate("delirium" if name == "delirium" else None)
+                event_id = await service.generate(
+                    "delirium" if name == "delirium" else None,
+                    topic_request=topic_request,
+                )
                 await service.preview(event_id)
             elif name == "drafts":
                 rows = store.conn.execute(
@@ -206,9 +220,11 @@ def build_router(service):
                 store.set("interval", int(args))
                 store.set("next_post", time.time() + int(args) * 60)
                 await message.answer("Интервал сохранен")
-            elif name == "probability" and 0 <= float(args) <= 1:
-                store.set("probability", float(args))
-                await message.answer("Вероятность сохранена")
+            elif name == "probability":
+                await message.answer(
+                    "Вероятность больше не ограничивает комментарии. "
+                    "Ответы включены для всех подходящих комментариев в обсуждениях канала"
+                )
             elif name == "memory":
                 await message.answer(
                     json.dumps(store.history(int(args)), ensure_ascii=False)[:3900] or "[]"
@@ -262,7 +278,7 @@ def build_router(service):
                 service.stop_event.set()
             elif name == "status":
                 await message.answer(
-                    f"Канал: {config.channel_id}\nЧат: {config.discussion_id}\nВладелец: {config.owner_id}\nПауза: {not service.enabled()}\nАвтопост: {store.get('autopost', False)}\nРежим: {store.get('mode', 'manual')}\nИнтервал: {store.get('interval', config.interval_minutes)} мин\nШанс ответа: {store.get('probability', config.reply_probability)}\nМодель: {config.model}\nГенератор новостей: plain-v2\nПроверка комментариев: canon-v2",
+                    f"Канал: {config.channel_id}\nЧат: {config.discussion_id}\nВладелец: {config.owner_id}\nПауза: {not service.enabled()}\nАвтопост: {store.get('autopost', False)}\nРежим: {store.get('mode', 'manual')}\nИнтервал: {store.get('interval', config.interval_minutes)} мин\nОтветы: без локальных задержек и случайного пропуска\nМодель: {config.model}\nГенератор новостей: plain-v2\nПроверка комментариев: canon-v2",
                     reply_markup=panel(),
                 )
             else:
@@ -382,12 +398,9 @@ def build_router(service):
             "INSERT OR IGNORE INTO messages VALUES (?,?,?,?)",
             (msg.message_id, root[0], text, time.time()),
         )
-        if store.cooling(f"user:{user}") or store.cooling("reply:global") or service.work.locked():
-            return
-        if random.random() >= store.get("probability", config.reply_probability):
-            return
-        store.cool(f"user:{user}", config.user_cooldown)
-        store.cool("reply:global", config.global_reply_cooldown)
+        # Every eligible comment queues for a reply. The shared work lock
+        # serializes generation instead of dropping comments during busy periods.
+        # External API/Telegram rate limits can still apply.
         try:
             async with service.work:
                 answer = await service.desk.reply(
