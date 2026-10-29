@@ -182,7 +182,7 @@ def build_router(service):
                         (('"', '"'), ("“", "”"), ("'", "'"))):
                         topic_request = topic_request[1:-1].strip()
                     if not 3 <= len(topic_request) <= 200 or any(
-                        ch in topic_request for ch in ("\\n", "\\r")
+                        ch in topic_request for ch in ("\n", "\r")
                     ):
                         raise ValueError()
                 await message.answer("Генерация и проверка канона...")
