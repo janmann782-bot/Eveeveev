@@ -43,10 +43,12 @@ class Service:
         if not changed:
             raise ModelError("NOT_EDITABLE")
         try:
-            await self.desk.audit(
-                text, row["location"] + " " + row["topic"],
-                for_comment=row["kind"] == "delirium",
-            )
+            if row["kind"] == "delirium":
+                await self.desk.audit(
+                    text, row["location"] + " " + row["topic"], for_comment=True
+                )
+            else:
+                await self.desk.audit(text, row["location"] + " " + row["topic"])
             data = json.loads(row["payload"])
             data["text"] = text
             self.store.conn.execute(
