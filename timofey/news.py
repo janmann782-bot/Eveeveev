@@ -236,7 +236,7 @@ class NewsDesk:
                         ),
                     },
                 ],
-                "canon_audit",
+                "comment_audit" if for_comment else "canon_audit",
                 json_mode=True,
                 max_tokens=650,
             )
