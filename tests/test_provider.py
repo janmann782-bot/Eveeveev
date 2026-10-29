@@ -117,7 +117,8 @@ async def test_truncated_answer_is_rejected(store, config):
     model = MiniMax(config, store, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     with pytest.raises(ModelError, match="INCOMPLETE_GENERATION"):
         await model.generate([], "test")
-    assert store.conn.execute("SELECT total FROM calls").fetchone()[0] == 5
+    assert store.conn.execute("SELECT count(*) FROM calls").fetchone()[0] == 2
+    assert [r[0] for r in store.conn.execute("SELECT total FROM calls ORDER BY id")] == [5, 5]
     await model.close()
 
 
@@ -154,4 +155,73 @@ async def test_change_to_free_mistral_allows_generation(store, config):
     model = MiniMax(config, store, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     assert await model.change_model(free_id) == "free"
     assert await model.generate([{"role": "user", "content": "test"}], "news") == "Кефирский выпуск"
+    await model.close()
+
+
+async def test_length_generation_retries_once_with_higher_budget(store, config):
+    requested = []
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json=catalog(config))
+        body = json.loads(request.content)
+        requested.append(body)
+        reason = "length" if len(requested) == 1 else "stop"
+        return httpx.Response(200, json={
+            "model": config.model,
+            "choices": [{"message": {"content": "Обрыв" if reason == "length" else "Готовая новость"},
+                         "finish_reason": reason}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 15, "total_tokens": 27},
+        })
+
+    model = MiniMax(config, store, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    result = await model.generate([{"role": "user", "content": "Новость"}], "news", max_tokens=1800)
+    assert result == "Готовая новость"
+    assert [b["max_tokens"] for b in requested] == [1800, 3600]
+    assert all(b["reasoning_effort"] == "none" for b in requested)
+    assert store.conn.execute("SELECT count(*) FROM calls WHERE state='done'").fetchone()[0] == 2
+    assert store.conn.execute("SELECT sum(total) FROM calls").fetchone()[0] == 54
+    await model.close()
+
+
+async def test_content_filtered_is_not_retried(store, config):
+    calls = []
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json=catalog(config))
+        calls.append(1)
+        return httpx.Response(200, json={
+            "model": config.model,
+            "choices": [{"message": {"content": ""}, "finish_reason": "content_filter"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 0, "total_tokens": 5},
+        })
+
+    model = MiniMax(config, store, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    with pytest.raises(ModelError, match="CONTENT_FILTERED"):
+        await model.generate([{"role": "user", "content": "test"}], "test")
+    assert calls == [1]
+    await model.close()
+
+
+async def test_short_audit_limit_is_raised_only_after_length(store, config):
+    used = []
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json=catalog(config))
+        body = json.loads(request.content)
+        used.append(body["max_tokens"])
+        return httpx.Response(200, json={
+            "model": config.model,
+            "choices": [{"message": {"content": "{}" if len(used) == 1 else '{"ok": true, "conflicts": []}'},
+                         "finish_reason": "length" if len(used) == 1 else "stop"}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 30, "total_tokens": 50},
+        })
+
+    model = MiniMax(config, store, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    answer = await model.generate([{"role": "user", "content": "Проверь"}], "canon_audit",
+                                  json_mode=True, max_tokens=650)
+    assert json.loads(answer)["ok"] is True
+    assert used == [650, 1300]
     await model.close()
