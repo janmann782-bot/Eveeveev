@@ -79,6 +79,35 @@ def validate_text(text, secrets=()):
         raise ModelError("INVALID_POST_STYLE")
 
 
+
+def retry_instruction(code, candidate=None):
+    """Return safe feedback; never echo a rejected model output."""
+    if code == "INVALID_TEXT_LENGTH":
+        if not isinstance(candidate, str) or not candidate.strip():
+            return (
+                "Поле text отсутствует или пустое. Напиши полную новость по-русски "
+                "от 800 до 1 800 символов: заголовок и 3-5 абзацев."
+            )
+        if len(candidate) < 30:
+            return (
+                "Предыдущий текст слишком короткий. Напиши полноценную новость "
+                "от 800 до 1 800 символов с заголовком и 3-5 абзацами."
+            )
+        return (
+            "Предыдущий текст слишком длинный для публикации. Напиши новую "
+            "самостоятельную новость от 800 до 1 800 символов, с заголовком "
+            "и 3-5 законченными абзацами. Не обрывай текст посередине."
+        )
+    return (
+        "Исправь редакционную ошибку "
+        + code
+        + ". Напиши новый самостоятельный выпуск по исходному заданию. "
+        "Верни только внешний JSON по output_schema. Поле text должно "
+        "содержать обычный готовый пост: заголовок и абзацы, без JSON, "
+        "сломанного языка или бессмысленных чисел. Проверяй арифметику."
+    )
+
+
 class NewsDesk:
     def __init__(self, store, knowledge, model, config, rng=None):
         self.store, self.kb, self.model, self.config = store, knowledge, model, config
@@ -168,6 +197,8 @@ class NewsDesk:
                         "content": json.dumps(
                             {
                                 "task": instruction,
+                                "target_post_length": "800-1800 символов, включая заголовок",
+                                "max_post_length": 3400,
                                 "topic": plan["topic"],
                                 "location": plan["location"],
                                 "canon": sources,
@@ -204,7 +235,8 @@ class NewsDesk:
             "INVALID_STORY_METADATA",
             "REPETITIVE_NEWS",
         }
-        for attempt in range(2):
+        for attempt in range(3):
+            text = None
             try:
                 data = parse_object(
                     await self.model.generate(messages, "news", json_mode=True)
@@ -238,21 +270,19 @@ class NewsDesk:
                 data["canon_sources"] = [r["id"] for r in sources]
                 await self.audit(text, plan["location"] + " " + plan["topic"])
             except ModelError as exc:
-                if attempt != 0 or str(exc) not in retryable:
+                code = str(exc)
+                if code == "INVALID_TEXT_LENGTH":
+                    if isinstance(text, str):
+                        reason = "TOO_LONG" if len(text) > 3800 else "TOO_SHORT"
+                    else:
+                        reason = "MISSING_TEXT"
+                    self.store.error("news_quality", reason)
+                # Other errors keep the original 2-attempt budget.
+                if code not in retryable or attempt == 2 or (attempt >= 1 and code != "INVALID_TEXT_LENGTH"):
                     raise
-                # Never copy malformed generated text back into a prompt.
                 messages.append({
                     "role": "user",
-                    "content": (
-                        "Редакционная проверка отклонила предыдущий вариант: "
-                        + str(exc)
-                        + ". Создай новую самостоятельную новость по исходному заданию. "
-                        "Верни полный внешний объект JSON по output_schema. Поле text должно "
-                        "содержать только нормальную публикацию: заголовок и абзацы без "
-                        "JSON, иностранного мусора и сломанных слов. Проверь арифметику, "
-                        "массы и физическую правдоподобность. Абсурд допускается "
-                        "в действиях чиновников и последствиях."
-                    ),
+                    "content": retry_instruction(code, text),
                 })
                 continue
             return self.store.draft(
