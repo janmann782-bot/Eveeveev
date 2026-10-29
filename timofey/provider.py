@@ -87,80 +87,102 @@ class MiniMax:
             if time.time() < self.blocked_until:
                 raise ModelError("CIRCUIT_OPEN")
             await self.free_route()
-            output = max_tokens or self.config.max_output_tokens
-            body = {
-                "model": self.config.model,
-                "messages": messages,
-                "max_tokens": output,
-                "temperature": 0.9,
-            }
-            if json_mode:
-                body["response_format"] = {"type": "json_object"}
-            # UTF-8 byte count is deliberately conservative; no guessing Cyrillic /4 tokens.
-            reservation = len(json.dumps(body, ensure_ascii=False).encode()) + output
-            try:
-                call_id = self.store.reserve(
-                    purpose,
-                    reservation,
-                    self.config.daily_token_limit,
-                    self.config.requests_per_minute,
-                )
-            except ValueError:
-                raise ModelError("LOCAL_BUDGET_OR_RATE_LIMIT") from None
-            headers = {"Authorization": "Bearer " + self.config.api_key}
-            try:
-                response = None
-                for attempt in range(3):
-                    # Same request body on retry; gateway deduplicates completed blocking requests.
-                    response = await self.client.post(
-                        self.BASE + "/chat/completions", json=body, headers=headers
+
+            output = max_tokens if max_tokens is not None else self.config.max_output_tokens
+            if not isinstance(output, int) or not 1 <= output <= 8192:
+                raise ModelError("INVALID_OUTPUT_LIMIT")
+
+            # The xKiro 'length' finish reason means max_tokens or context was
+            # exhausted. Retrying the exact same body cannot fix either.
+            # Reasoning tokens also consume the output allowance.
+            for generation_attempt in range(2):
+                body = {
+                    "model": self.config.model,
+                    "messages": messages,
+                    "max_tokens": output,
+                    "temperature": 0.9,
+                    "reasoning_effort": "none",
+                }
+                if json_mode:
+                    body["response_format"] = {"type": "json_object"}
+
+                # Conservative upper bound for Cyrillic: one UTF-8 byte/token.
+                reservation = len(json.dumps(body, ensure_ascii=False).encode()) + output
+                try:
+                    call_id = self.store.reserve(
+                        purpose,
+                        reservation,
+                        self.config.daily_token_limit,
+                        self.config.requests_per_minute,
                     )
-                    if response.status_code not in (429, 500, 502, 503):
-                        break
-                    if attempt < 2:
-                        try:
-                            delay = float(response.headers.get("Retry-After", 2**attempt))
-                        except ValueError:
-                            delay = 2**attempt
-                        if delay > 30:
-                            raise ModelError("RATE_LIMIT_RETRY_LATER")
-                        await asyncio.sleep(max(0, delay) + random.random())
-                if response.status_code != 200:
-                    raise ModelError("HTTP_" + str(response.status_code))
-                data = response.json()
-                usage = data.get("usage")
-                if usage and all(
-                    isinstance(usage.get(k), int) and usage[k] >= 0
-                    for k in ("prompt_tokens", "completion_tokens", "total_tokens")
-                ):
-                    self.store.settle(call_id, usage)
-                else:
-                    self.store.settle(call_id)
-                if data.get("model") != self.config.model:
-                    raise ModelError("UNEXPECTED_MODEL")
-                choice = data["choices"][0]
-                if choice.get("finish_reason") != "stop":
-                    raise ModelError("INCOMPLETE_GENERATION")
-                text = choice["message"]["content"]
-                if not isinstance(text, str) or not text.strip():
-                    raise ModelError("EMPTY_GENERATION")
-                # Never expose reasoning as publication content.
-                if "<think>" in text or "</think>" in text:
-                    raise ModelError("REASONING_IN_CONTENT")
-                self.failures = 0
-                return text.strip()
-            except asyncio.CancelledError:
-                self.store.settle(call_id)
-                raise
-            except Exception as exc:
-                row = self.store.conn.execute(
-                    "SELECT state FROM calls WHERE id=?", (call_id,)
-                ).fetchone()
-                if row[0] == "pending":
-                    self.store.settle(call_id)
-                self.failures += 1
-                if self.failures >= 3:
-                    self.blocked_until = time.time() + 300
-                code = str(exc) if isinstance(exc, ModelError) else "PROVIDER_UNAVAILABLE"
-                self.store.error("minimax", code)
-                raise ModelError(code) from None
+                except ValueError:
+                    raise ModelError("LOCAL_BUDGET_OR_RATE_LIMIT") from None
+
+                settled = False
+                headers = {"Authorization": "Bearer " + self.config.api_key}
+                try:
+                    response = None
+                    for attempt in range(3):
+                        response = await self.client.post(
+                            self.BASE + "/chat/completions", json=body, headers=headers
+                        )
+                        if response.status_code not in (429, 500, 502, 503):
+                            break
+                        if attempt < 2:
+                            try:
+                                delay = float(response.headers.get("Retry-After", 2**attempt))
+                            except ValueError:
+                                delay = 2**attempt
+                            if delay > 30:
+                                raise ModelError("RATE_LIMIT_RETRY_LATER")
+                            await asyncio.sleep(max(0, delay) + random.random())
+                    if response.status_code != 200:
+                        raise ModelError("HTTP_" + str(response.status_code))
+
+                    data = response.json()
+                    usage = data.get("usage")
+                    if usage and all(
+                        isinstance(usage.get(k), int) and usage[k] >= 0
+                        for k in ("prompt_tokens", "completion_tokens", "total_tokens")
+                    ):
+                        self.store.settle(call_id, usage)
+                    else:
+                        self.store.settle(call_id)
+                    settled = True
+
+                    if data.get("model") != self.config.model:
+                        raise ModelError("UNEXPECTED_MODEL")
+                    choice = data["choices"][0]
+                    reason = choice.get("finish_reason")
+
+                    if reason == "length":
+                        if generation_attempt == 0 and output < 8192:
+                            output = min(8192, max(output * 2, output + 512))
+                            continue
+                        raise ModelError("INCOMPLETE_GENERATION")
+                    if reason == "content_filter":
+                        raise ModelError("CONTENT_FILTERED")
+                    if reason != "stop":
+                        raise ModelError("INCOMPLETE_GENERATION")
+
+                    text = choice["message"]["content"]
+                    if not isinstance(text, str) or not text.strip():
+                        raise ModelError("EMPTY_GENERATION")
+                    if "<think>" in text or "</think>" in text:
+                        raise ModelError("REASONING_IN_CONTENT")
+                    self.failures = 0
+                    return text.strip()
+                except asyncio.CancelledError:
+                    if not settled:
+                        self.store.settle(call_id)
+                    raise
+                except Exception as exc:
+                    if not settled:
+                        self.store.settle(call_id)
+                    self.failures += 1
+                    if self.failures >= 3:
+                        self.blocked_until = time.time() + 300
+                    code = str(exc) if isinstance(exc, ModelError) else "PROVIDER_UNAVAILABLE"
+                    self.store.error("xkiro", code)
+                    raise ModelError(code) from None
+            raise ModelError("INCOMPLETE_GENERATION")
