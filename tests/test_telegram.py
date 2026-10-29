@@ -151,8 +151,7 @@ async def test_foreign_chat_key_ignored(config, store, kb):
     await b.session.close()
 
 
-async def test_comment_context_reply_and_no_loop(config, store, kb, monkeypatch):
-    monkeypatch.setattr("timofey.telegram.random.random", lambda: 0)
+async def test_comment_context_reply_and_no_loop(config, store, kb):
     d, b, s, svc = setup(config, store, kb)
     # Force separate one-word mechanic for deterministic test.
     svc.desk.rng = SimpleNamespace(randrange=lambda n: 5)
@@ -223,3 +222,64 @@ def test_admin_identity_numeric(config):
     assert admin_allowed(config.owner_id, config.owner_id, "private", config)
     assert not admin_allowed(123, config.owner_id, "private", config)
     assert not admin_allowed(config.owner_id, -1002, "supergroup", config)
+
+async def test_custom_nt_uses_owner_topic(config, store, kb):
+    d, b, s, svc = setup(config, store, kb)
+    await d.feed_update(
+        b,
+        Update(
+            update_id=91,
+            message=message(
+                config.owner_id, config.owner_id,
+                text='/NT "ГКАЗ забыл отправить автомобили в Ниженовогороде"',
+            ),
+        ),
+    )
+    event = store.event(1)
+    assert event is not None
+    assert event["kind"] == "new"
+    assert event["topic"] == "ГКАЗ забыл отправить автомобили в Ниженовогороде"
+    assert event["location"] == "Ниженовогород"
+    assert any(isinstance(req, SendMessage) and "Черновик" in req.text for req in s.calls)
+    await b.session.close()
+
+
+async def test_nt_without_topic_does_not_create_draft(config, store, kb):
+    d, b, s, svc = setup(config, store, kb)
+    await d.feed_update(
+        b, Update(update_id=92, message=message(config.owner_id, config.owner_id, text="/NT"))
+    )
+    assert store.conn.execute("SELECT count(*) FROM events").fetchone()[0] == 0
+    assert any(isinstance(req, SendMessage) and "Неверные аргументы" in req.text for req in s.calls)
+    await b.session.close()
+
+
+async def test_two_comments_from_same_user_without_local_cooldown(config, store, kb):
+    d, b, s, svc = setup(config, store, kb)
+    store.set("probability", 0.0)
+    svc.desk.rng = SimpleNamespace(randrange=lambda n: 5)
+    source = Message(
+        message_id=100,
+        date=datetime.now(timezone.utc),
+        chat=Chat(id=config.discussion_id, type="supergroup"),
+        sender_chat=Chat(id=config.channel_id, type="channel"),
+        is_automatic_forward=True,
+        forward_origin=MessageOriginChannel(
+            type="channel",
+            date=datetime.now(timezone.utc),
+            chat=Chat(id=config.channel_id, type="channel"),
+            message_id=77,
+        ),
+        text="ЦИК прокомментировала выборы",
+    )
+    await d.feed_update(b, Update(update_id=93, message=source))
+    for i in range(2):
+        comment = message(
+            555, config.discussion_id, "supergroup",
+            text="Почему отменили выборы?", reply_to_message=source,
+        ).model_copy(update={"message_id": 210 + i})
+        await d.feed_update(b, Update(update_id=94 + i, message=comment))
+    answers = [req for req in s.calls if isinstance(req, SendMessage)]
+    assert len(answers) == 2
+    assert all(req.text == "Вмешательство." for req in answers)
+    await b.session.close()
