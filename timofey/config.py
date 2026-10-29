@@ -20,7 +20,7 @@ class Config:
     model: str = "mistralai/mistral-large-2512"
     data_dir: Path = Path("runtime")
     knowledge_file: Path = Path("knowledge/canon.jsonl")
-    max_output_tokens: int = 1800
+    max_output_tokens: int = 3072
     daily_token_limit: int = 500000
     requests_per_minute: int = 6
     user_cooldown: int = 180
@@ -39,8 +39,8 @@ class Config:
             raise ValueError("AI_MODEL must be a full xKiro model ID")
         if not 0 <= self.reply_probability <= 1:
             raise ValueError("REPLY_PROBABILITY must be 0..1")
-        if not 128 <= self.max_output_tokens <= 4096:
-            raise ValueError("MAX_OUTPUT_TOKENS must be 128..4096")
+        if not 128 <= self.max_output_tokens <= 8192:
+            raise ValueError("MAX_OUTPUT_TOKENS must be 128..8192")
         for value in (
             self.daily_token_limit,
             self.requests_per_minute,
