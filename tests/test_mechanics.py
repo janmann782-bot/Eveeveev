@@ -94,6 +94,22 @@ async def test_one_word_and_user_memory(store, kb, config):
         await desk.reply(101, "Почему?", "", style=5)
 
 
+async def test_followup_carries_previous_country_lore_into_context(store, kb, config):
+    kb.add(
+        "СОР",
+        "Северные Объединенные Республики существуют отдельно от САР Кефирстан",
+    )
+    store.remember(101, "user", "Что такое Северные Объеденные Республики?")
+    store.remember(101, "assistant", "Это государство Аурелии")
+    store.remember(101, "user", "Ты что, кроме Кефирстана ничего не знаешь?")
+    model = FakeModel()
+    desk = NewsDesk(store, kb, model, config)
+    await desk.reply(101, "Ты что, кроме Кефирстана ничего не знаешь?", "", style=5)
+    prompt = json.loads(model.calls[0][0][1]["content"])
+    assert any(item["title"] == "СОР" for item in prompt["canon"])
+    assert "Северные Объеденные" in str(prompt["this_citizen_memory"])
+
+
 def test_memory_bounded_and_expiring(store):
     for i in range(50):
         store.remember(1, "user", str(i), limit=6)
