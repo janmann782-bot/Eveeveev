@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from timofey.news import NewsDesk, extract_news_text, validate_text
+from timofey.news import NewsDesk, extract_news_text, validate_delirium, validate_text
 from timofey.provider import ModelError
 
 
@@ -200,3 +200,37 @@ async def test_three_invalid_length_attempts_never_make_draft(store, config, kb)
         await NewsDesk(store, kb, model, config).generate("new")
     assert model.news_attempts == 3
     assert store.conn.execute("SELECT count(*) FROM events").fetchone()[0] == 0
+
+
+def test_drunk_style_rejects_heading_but_allows_spontaneous_mess():
+    validate_delirium("Бля я опять спросил у моста про воду а он меня послал! Ну я его тоже, я президент вообще-то")
+    with pytest.raises(ModelError, match="INVALID_DELIRIUM_FORMAT"):
+        validate_delirium("Белая горячка Тимофея Рализма\\n\\nЯ выпил")
+
+
+async def test_delirium_is_a_raw_drunk_post_not_formatted_news(store, config, kb):
+    model = PlainEditorialModel([
+        "Бля ну я вам сейчас скажу. Почему у меня в столе лежит чужой мост? Я вчера его не покупал. Кто отнес Конституцию в холодильник, сука?"
+    ])
+    desk = NewsDesk(store, kb, model, config)
+    event_id = await desk.generate("delirium")
+    event = store.event(event_id)
+    assert event["kind"] == "delirium"
+    assert event["location"] == "Кефирстан"
+    assert event["body"].startswith("Бля")
+    assert not event["body"].startswith("Белая горячка")
+    assert json.loads(event["payload"])["story_status"] == "closed"
+    assert "Telegram-канал" in json.loads(model.news_messages[0][1]["content"])["task"]
+
+
+async def test_nt_custom_topic_is_used_without_random_substitution(store, config, kb):
+    model = PlainEditorialModel([
+        "ГКАЗ организовал необычную доставку\\n\\nНа заводе решили выдавать накладные только после того, как грузовик лично представится диспетчеру. Очередь выросла"
+    ])
+    desk = NewsDesk(store, kb, model, config)
+    event_id = await desk.generate(topic_request="ГКАЗ потерял автомобили в Ниженовогороде")
+    event = store.event(event_id)
+    assert event["kind"] == "new"
+    assert event["topic"] == "ГКАЗ потерял автомобили в Ниженовогороде"
+    assert event["location"] == "Ниженовогород"
+    assert "ГКАЗ потерял автомобили" in json.loads(model.news_messages[0][1]["content"])["task"]
