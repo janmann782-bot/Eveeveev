@@ -141,7 +141,7 @@ def validate_delirium(text, secrets=()):
         raise ModelError("SERVICE_CONTENT_IN_OUTPUT")
     if text.lstrip().startswith(("#", "**", "```")):
         raise ModelError("INVALID_DELIRIUM_FORMAT")
-    if re.match(r"(?i)^(белая горячка|пьяный рализм|новости кефирстана)\\b", text.strip()):
+    if re.match(r"(?i)^(белая горячка|пьяный рализм|новости кефирстана)\b", text.strip()):
         raise ModelError("INVALID_DELIRIUM_FORMAT")
 
 
