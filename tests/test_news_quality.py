@@ -85,14 +85,21 @@ async def test_metadata_only_response_cannot_be_published(store, config, kb):
     "raw,expected",
     [
         ("Комиссия рассмотрела заявление\n\nВ столице состоялось заседание", "Комиссия рассмотрела заявление"),
-        ('{"Заголовок":"Событие","Текст":"В парламенте объявили перерыв на обед"}', "Событие\n\nВ парламенте"),
-        ('{"title":"Тема","content":"Текст о заседании совета"}', "Тема\n\nТекст о заседании"),
-        ('{"result":{"publication":"Завод объявил новый порядок\n\nНачальник утвердил список"}}', "Завод объявил"),
-        ("\`\`\`json\n{\"text\":\"Завод объявил новый порядок\\n\\nНачальник утвердил список\"}\n\`\`\`", "Завод объявил"),
+        (json.dumps({"Заголовок": "Событие", "Текст": "В парламенте объявили перерыв на обед"}, ensure_ascii=False), "Событие\n\nВ парламенте"),
+        (json.dumps({"title": "Тема", "content": "Текст о заседании совета"}, ensure_ascii=False), "Тема\n\nТекст о заседании"),
+        (json.dumps({"result": {"publication": "Завод объявил новый порядок\n\nНачальник утвердил список"}}, ensure_ascii=False), "Завод объявил"),
+        ("***NOT_A_FENCE***", "***NOT_A_FENCE***"),
     ],
 )
 def test_extract_news_accepts_plain_and_wrapped_formats(raw, expected):
     assert extract_news_text(raw).startswith(expected)
+
+
+def test_extract_news_removes_complete_json_fence():
+    raw = "```json\n" + json.dumps({
+        "text": "В Каменном Мосте появился новый протокол\n\nКомиссия утвердила список"
+    }, ensure_ascii=False) + "\n```"
+    assert extract_news_text(raw).startswith("В Каменном Мосте")
 
 
 @pytest.mark.parametrize(
@@ -150,10 +157,10 @@ async def test_missing_text_from_model_now_gets_retry_with_plain_output(store, c
 @pytest.mark.parametrize(
     "candidate,expected",
     [
-        ("", "отсутствует или пустое"),
-        (None, "отсутствует или пустое"),
-        ("Коротко", "слишком короткий"),
-        ("А" * 4000, "слишком длинный"),
+        ("", "нет готовой новости"),
+        (None, "нет готовой новости"),
+        ("Коротко", "слишком короткая"),
+        ("А" * 4000, "слишком длинная"),
     ],
 )
 def test_size_specific_retry_instruction(candidate, expected):
@@ -171,7 +178,7 @@ async def test_short_post_regenerates_with_length_feedback(store, config, kb):
     ])
     event_id = await NewsDesk(store, kb, model, config).generate("new")
     assert model.news_attempts == 2
-    assert "слишком короткий" in model.news_messages[1][-1]["content"]
+    assert "слишком короткая" in model.news_messages[1][-1]["content"]
     assert store.event(event_id)["state"] == "draft"
 
 
@@ -182,7 +189,7 @@ async def test_overlong_post_regenerates_without_truncation(store, config, kb):
     ])
     event_id = await NewsDesk(store, kb, model, config).generate("new")
     assert model.news_attempts == 2
-    assert "слишком длинный" in model.news_messages[1][-1]["content"]
+    assert "слишком длинная" in model.news_messages[1][-1]["content"]
     assert len(store.event(event_id)["body"]) < 3800
     assert store.conn.execute("SELECT count(*) FROM errors WHERE code='TOO_LONG'").fetchone()[0] == 1
 
