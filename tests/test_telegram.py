@@ -283,3 +283,39 @@ async def test_two_comments_from_same_user_without_local_cooldown(config, store,
     assert len(answers) == 2
     assert all(req.text == "Вмешательство." for req in answers)
     await b.session.close()
+
+
+async def test_owner_can_inspect_loaded_lore_and_sor(config, store, kb):
+    d, b, session, svc = setup(config, store, kb)
+    kb.add("СОР", "Северные Объединенные Республики - страна Аурелии")
+    await d.feed_update(
+        b, Update(update_id=201, message=message(
+            config.owner_id, config.owner_id, text="/lorestats",
+        )),
+    )
+    assert any(
+        isinstance(req, SendMessage) and "Фрагментов канона:" in req.text
+        for req in session.calls
+    )
+    await d.feed_update(
+        b, Update(update_id=202, message=message(
+            config.owner_id, config.owner_id,
+            text="/lorecheck Северные Объеденные Республики",
+        )),
+    )
+    assert any(
+        isinstance(req, SendMessage) and "СОР:" in req.text
+        for req in session.calls
+    )
+    await b.session.close()
+
+
+async def test_stranger_cannot_run_lore_diagnostics(config, store, kb):
+    d, b, session, svc = setup(config, store, kb)
+    await d.feed_update(
+        b, Update(update_id=203, message=message(
+            888, config.discussion_id, "supergroup", text="/lorestats",
+        )),
+    )
+    assert not session.calls
+    await b.session.close()
