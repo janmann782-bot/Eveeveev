@@ -271,6 +271,7 @@ class NewsDesk:
         plan = self.plan('new' if topic_request else forced)
         if topic_request:
             plan['topic'] = topic_request
+            plan['location'] = 'Кефирстан'
             # Preserve explicitly named places instead of inventing a random location.
             for place in sorted(PLACES, key=len, reverse=True):
                 if place.casefold() in topic_request.casefold():
