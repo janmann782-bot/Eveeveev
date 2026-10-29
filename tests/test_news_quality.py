@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from timofey.news import NewsDesk, validate_text
+from timofey.news import NewsDesk, extract_news_text, validate_text
 from timofey.provider import ModelError
 
 
@@ -51,15 +51,16 @@ class FakeEditorialModel:
         )
 
 
-async def test_malformed_json_post_is_regenerated_before_save(store, config, kb):
+async def test_legacy_json_post_is_normalized_as_plain_text(store, config, kb):
     model = FakeEditorialModel([
-        '{"Заголовок": "Новая акция", "Текст": "Бригада покинула завод"}',
-        "Завод отправил мешки на соревнования\n\nОрганизаторы забыли оформить накладную и теперь спорят с весами",
+        '{"Заголовок": "Новая акция", "Текст": "Бригада покинула завод после заседания"}',
     ])
     event_id = await NewsDesk(store, kb, model, config).generate("new")
-    assert model.news_attempts == 2
-    assert len(model.news_messages[1]) == 3
-    assert store.event(event_id)["body"].startswith("Завод отправил мешки")
+    assert model.news_attempts == 1
+    assert not model.news_messages[0][0]["content"].endswith("JSON.")
+    assert store.event(event_id)["body"].startswith("Новая акция\n\nБригада")
+    assert not store.event(event_id)["body"].startswith("{")
+    assert store.event(event_id)["payload"]
 
 
 async def test_unrealistic_numeric_news_is_rejected_by_editor_and_retried(store, config, kb):
@@ -72,13 +73,78 @@ async def test_unrealistic_numeric_news_is_rejected_by_editor_and_retried(store,
     assert "печать" in store.event(event_id)["body"]
 
 
-async def test_two_malformed_attempts_do_not_leave_draft(store, config, kb):
-    bad = '{"Заголовок": "Запись", "Текст": "Битый формат"}'
-    model = FakeEditorialModel([bad, bad])
-    with pytest.raises(ModelError, match="RAW_JSON_IN_POST"):
+async def test_metadata_only_response_cannot_be_published(store, config, kb):
+    model = FakeEditorialModel(['{"organizations": [], "story_status": "open"}'])
+    with pytest.raises(ModelError, match="MISSING_POST_CONTENT"):
         await NewsDesk(store, kb, model, config).generate("new")
-    assert model.news_attempts == 2
+    assert model.news_attempts == 3
     assert store.conn.execute("SELECT count(*) FROM events").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("Комиссия рассмотрела заявление\n\nВ столице состоялось заседание", "Комиссия рассмотрела заявление"),
+        ('{"Заголовок":"Событие","Текст":"В парламенте объявили перерыв на обед"}', "Событие\n\nВ парламенте"),
+        ('{"title":"Тема","content":"Текст о заседании совета"}', "Тема\n\nТекст о заседании"),
+        ('{"result":{"publication":"Завод объявил новый порядок\n\nНачальник утвердил список"}}', "Завод объявил"),
+        ("\`\`\`json\n{\"text\":\"Завод объявил новый порядок\\n\\nНачальник утвердил список\"}\n\`\`\`", "Завод объявил"),
+    ],
+)
+def test_extract_news_accepts_plain_and_wrapped_formats(raw, expected):
+    assert extract_news_text(raw).startswith(expected)
+
+
+@pytest.mark.parametrize(
+    "raw,code",
+    [
+        ('{"organizations": [], "story_status": "open"}', "MISSING_POST_CONTENT"),
+        ('{"title": "Only title"}', "MISSING_POST_CONTENT"),
+        ('{"broken":', "INVALID_JSON"),
+        ('[]', "INVALID_POST_FORMAT"),
+    ],
+)
+def test_extract_news_refuses_empty_or_malformed_post(raw, code):
+    with pytest.raises(ModelError, match=code):
+        extract_news_text(raw)
+
+
+class PlainEditorialModel(FakeEditorialModel):
+    async def generate(self, messages, purpose, **kwargs):
+        if purpose == "canon_audit":
+            return json.dumps({"ok": True, "conflicts": []})
+        assert purpose == "news"
+        assert not kwargs.get("json_mode")
+        self.news_messages.append(messages.copy())
+        index = min(self.news_attempts, len(self.drafts) - 1)
+        self.news_attempts += 1
+        return self.drafts[index]
+
+
+async def test_plain_post_is_saved_without_model_metadata(store, config, kb):
+    model = PlainEditorialModel([
+        "В Каменном Мосте провели заседание\n\nПравительство постановило осмотреть 3 новых светофора. 1 светофор отказался принимать комиссию"
+    ])
+    event_id = await NewsDesk(store, kb, model, config).generate("new")
+    data = json.loads(store.event(event_id)["payload"])
+    assert data["text"].startswith("В Каменном Мосте")
+    assert data["organizations"] == []
+    assert data["characters"] == []
+    assert data["story_status"] == "open"
+    assert data["consequences"]
+    assert model.news_attempts == 1
+
+
+async def test_missing_text_from_model_now_gets_retry_with_plain_output(store, config, kb):
+    model = PlainEditorialModel([
+        '{"organizations":["ГКАЗ"],"story_status":"open"}',
+        "В Ниженовогороде изменили график\n\nЗавод обязали согласовать доставку цемента с городской комиссией. Комиссия не пришла"
+    ])
+    event_id = await NewsDesk(store, kb, model, config).generate("new")
+    assert model.news_attempts == 2
+    assert "без JSON" in model.news_messages[1][-1]["content"]
+    assert store.event(event_id)["body"].startswith("В Ниженовогороде")
+    assert store.conn.execute("SELECT count(*) FROM errors WHERE code='MISSING_TEXT'").fetchone()[0] == 1
 
 
 @pytest.mark.parametrize(
