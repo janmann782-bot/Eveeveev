@@ -278,7 +278,7 @@ def build_router(service):
                 service.stop_event.set()
             elif name == "status":
                 await message.answer(
-                    f"Канал: {config.channel_id}\nЧат: {config.discussion_id}\nВладелец: {config.owner_id}\nПауза: {not service.enabled()}\nАвтопост: {store.get('autopost', False)}\nРежим: {store.get('mode', 'manual')}\nИнтервал: {store.get('interval', config.interval_minutes)} мин\nОтветы: без локальных задержек и случайного пропуска\nМодель: {config.model}\nГенератор новостей: plain-v2\nПроверка комментариев: canon-v2",
+                    f"Канал: {config.channel_id}\nЧат: {config.discussion_id}\nВладелец: {config.owner_id}\nПауза: {not service.enabled()}\nАвтопост: {store.get('autopost', False)}\nРежим: {store.get('mode', 'manual')}\nИнтервал: {store.get('interval', config.interval_minutes)} мин\nОтветы: без локальных задержек и случайного пропуска\nМодель: {config.model}\nГенератор новостей: plain-v2\nСпецрежим: delirium-v3, /NT\nПроверка комментариев: canon-v2",
                     reply_markup=panel(),
                 )
             else:
