@@ -161,9 +161,7 @@ class NewsDesk:
             instruction = "Покажи новое последствие выбранного события. Не пересказывай его. Это предпоследний или последний выпуск линии."
         elif plan["kind"] == "crossover":
             instruction = "Свяжи последствия 2 разных выбранных историй в 1 новое событие и закрой это пересечение."
-        data = parse_object(
-            await self.model.generate(
-                [
+        messages = [
                     {"role": "system", "content": NEWS_STYLE},
                     {
                         "role": "user",
@@ -190,42 +188,77 @@ class NewsDesk:
                             ensure_ascii=False,
                         ),
                     },
-                ],
-                "news",
-                json_mode=True,
-            )
-        )
-        text = data.get("text")
-        validate_text(text, (self.config.api_key, self.config.bot_token))
-        if (
-            plan["kind"] == "delirium"
-            and "Белая горячка Тимофея Рализма" not in text.split("\n")[0]
-        ):
-            raise ModelError("SPECIAL_HEADING_MISSING")
-        if plan["kind"] != "delirium" and "белая горячка тимофея рализма" in text.lower():
-            raise ModelError("UNSCHEDULED_SPECIAL")
-        for key in ("organizations", "characters"):
+                ]
+        retryable = {
+            "RAW_JSON_IN_POST",
+            "CORRUPTED_MIXED_SCRIPT",
+            "EXCESSIVE_FOREIGN_LANGUAGE",
+            "INVALID_POST_STYLE",
+            "INVALID_TEXT_LENGTH",
+            "INVALID_JSON",
+            "INVALID_JSON_OBJECT",
+            "CANON_REVIEW_REQUIRED",
+            "SPECIAL_HEADING_MISSING",
+            "UNSCHEDULED_SPECIAL",
+            "INVALID_EVENT_METADATA",
+            "INVALID_STORY_METADATA",
+            "REPETITIVE_NEWS",
+        }
+        for attempt in range(2):
+            try:
+                data = parse_object(
+                    await self.model.generate(messages, "news", json_mode=True)
+                )
+            text = data.get("text")
+            validate_text(text, (self.config.api_key, self.config.bot_token))
             if (
-                not isinstance(data.get(key), list)
-                or len(data[key]) > 20
-                or any(not isinstance(v, str) or len(v) > 200 for v in data[key])
+                plan["kind"] == "delirium"
+                and "Белая горячка Тимофея Рализма" not in text.split("\n")[0]
             ):
-                raise ModelError("INVALID_EVENT_METADATA")
-        if data.get("story_status") not in ("open", "closed") or not isinstance(
-            data.get("consequences"), str
-        ):
-            raise ModelError("INVALID_STORY_METADATA")
-        for event in recent:
-            if SequenceMatcher(None, text.lower(), event["body"].lower()).ratio() > 0.72:
-                raise ModelError("REPETITIVE_NEWS")
-        if plan["kind"] in ("crossover", "delirium") or plan["depth"] >= 2:
-            data["story_status"] = "closed"
-        data["related_events"] = [r["id"] for r in plan["parents"]]
-        data["canon_sources"] = [r["id"] for r in sources]
-        await self.audit(text, plan["location"] + " " + plan["topic"])
-        return self.store.draft(
-            data, plan["kind"], plan["topic"], plan["location"], plan["story"], plan["depth"]
-        )
+                raise ModelError("SPECIAL_HEADING_MISSING")
+            if plan["kind"] != "delirium" and "белая горячка тимофея рализма" in text.lower():
+                raise ModelError("UNSCHEDULED_SPECIAL")
+            for key in ("organizations", "characters"):
+                if (
+                    not isinstance(data.get(key), list)
+                    or len(data[key]) > 20
+                    or any(not isinstance(v, str) or len(v) > 200 for v in data[key])
+                ):
+                    raise ModelError("INVALID_EVENT_METADATA")
+            if data.get("story_status") not in ("open", "closed") or not isinstance(
+                data.get("consequences"), str
+            ):
+                raise ModelError("INVALID_STORY_METADATA")
+            for event in recent:
+                if SequenceMatcher(None, text.lower(), event["body"].lower()).ratio() > 0.72:
+                    raise ModelError("REPETITIVE_NEWS")
+            if plan["kind"] in ("crossover", "delirium") or plan["depth"] >= 2:
+                data["story_status"] = "closed"
+            data["related_events"] = [r["id"] for r in plan["parents"]]
+            data["canon_sources"] = [r["id"] for r in sources]
+            await self.audit(text, plan["location"] + " " + plan["topic"])
+            except ModelError as exc:
+                if attempt != 0 or str(exc) not in retryable:
+                    raise
+                # Never copy malformed generated text back into a prompt.
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Редакционная проверка отклонила предыдущий вариант: "
+                        + str(exc)
+                        + ". Создай новую самостоятельную новость по исходному заданию. "
+                        "Верни полный внешний объект JSON по output_schema. Поле text должно "
+                        "содержать только нормальную публикацию: заголовок и абзацы без "
+                        "JSON, иностранного мусора и сломанных слов. Проверь арифметику, "
+                        "массы и физическую правдоподобность. Абсурд допускается "
+                        "в действиях чиновников и последствиях."
+                    ),
+                })
+                continue
+            return self.store.draft(
+                data, plan["kind"], plan["topic"], plan["location"], plan["story"], plan["depth"]
+            )
+        raise ModelError("EDITORIAL_REVIEW_FAILED")
 
     async def reply(self, user_id, text, context, style=None):
         style = self.rng.randrange(len(STYLES)) if style is None else style
