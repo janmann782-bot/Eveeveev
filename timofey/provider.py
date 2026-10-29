@@ -1,0 +1,164 @@
+import asyncio
+import json
+import os
+import random
+import time
+from decimal import Decimal, InvalidOperation
+
+import httpx
+
+
+class ModelError(Exception):
+    """Public error codes contain no provider response or credentials."""
+
+
+class MiniMax:
+    BASE = "https://api.xkiro.com/v1"
+
+    def __init__(self, config, store, client=None):
+        self.config, self.store = config, store
+        self.client = client or httpx.AsyncClient(timeout=90, follow_redirects=False)
+        self.lock = asyncio.Lock()
+        self.catalog_at = 0
+        self.failures = 0
+        self.blocked_until = 0
+
+    async def close(self):
+        await self.client.aclose()
+
+    async def change_key(self, key):
+        if not 12 <= len(key) <= 512 or any(c.isspace() for c in key):
+            raise ModelError("INVALID_KEY_FORMAT")
+        async with self.lock:
+            self.config.api_key = key
+            os.environ["XKIRO_API_KEY"] = key
+            self.failures = 0
+            self.blocked_until = 0
+
+    async def change_model(self, model):
+        if not model.startswith("minimax/") or len(model) > 150 or any(c.isspace() for c in model):
+            raise ModelError("MINIMAX_MODEL_REQUIRED")
+        async with self.lock:
+            try:
+                response = await self.client.get(self.BASE + "/models")
+                response.raise_for_status()
+                item = next((m for m in response.json()["data"] if m.get("id") == model), None)
+            except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                raise ModelError("CATALOG_UNAVAILABLE") from None
+            if not item:
+                raise ModelError("MODEL_NOT_IN_CATALOG")
+            self.config.model = model
+            self.catalog_at = 0
+            os.environ["MINIMAX_MODEL"] = model
+            self.store.set("model", model)
+            self.failures = 0
+            self.blocked_until = 0
+            return item.get("access_tier", "unknown")
+
+    async def free_route(self):
+        if time.monotonic() - self.catalog_at < 300:
+            return
+        try:
+            r = await self.client.get(self.BASE + "/models")
+            r.raise_for_status()
+            item = next((m for m in r.json()["data"] if m["id"] == self.config.model), None)
+            if not item:
+                raise ModelError("NO_VERIFIED_FREE_MINIMAX_ROUTE")
+            if item.get("access_tier") != "free":
+                raise ModelError("PAID_ROUTE_BLOCKED")
+            prices = item.get("pricing", {})
+            if not all(k in prices for k in ("input", "output")):
+                raise ModelError("UNVERIFIED_PRICING")
+            for k in ("input", "output", "cache_read", "cache_write"):
+                if k in prices and Decimal(str(prices[k])) != 0:
+                    raise ModelError("PAID_ROUTE_BLOCKED")
+            self.catalog_at = time.monotonic()
+        except ModelError:
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, InvalidOperation):
+            raise ModelError("CATALOG_UNAVAILABLE") from None
+
+    async def generate(self, messages, purpose, *, json_mode=False, max_tokens=None):
+        if not self.config.api_key:
+            raise ModelError("XKIRO_API_KEY_MISSING")
+        async with self.lock:
+            if time.time() < self.blocked_until:
+                raise ModelError("CIRCUIT_OPEN")
+            await self.free_route()
+            output = max_tokens or self.config.max_output_tokens
+            body = {
+                "model": self.config.model,
+                "messages": messages,
+                "max_tokens": output,
+                "temperature": 0.9,
+            }
+            if json_mode:
+                body["response_format"] = {"type": "json_object"}
+            # UTF-8 byte count is deliberately conservative; no guessing Cyrillic /4 tokens.
+            reservation = len(json.dumps(body, ensure_ascii=False).encode()) + output
+            try:
+                call_id = self.store.reserve(
+                    purpose,
+                    reservation,
+                    self.config.daily_token_limit,
+                    self.config.requests_per_minute,
+                )
+            except ValueError:
+                raise ModelError("LOCAL_BUDGET_OR_RATE_LIMIT") from None
+            headers = {"Authorization": "Bearer " + self.config.api_key}
+            try:
+                response = None
+                for attempt in range(3):
+                    # Same request body on retry; gateway deduplicates completed blocking requests.
+                    response = await self.client.post(
+                        self.BASE + "/chat/completions", json=body, headers=headers
+                    )
+                    if response.status_code not in (429, 500, 502, 503):
+                        break
+                    if attempt < 2:
+                        try:
+                            delay = float(response.headers.get("Retry-After", 2**attempt))
+                        except ValueError:
+                            delay = 2**attempt
+                        if delay > 30:
+                            raise ModelError("RATE_LIMIT_RETRY_LATER")
+                        await asyncio.sleep(max(0, delay) + random.random())
+                if response.status_code != 200:
+                    raise ModelError("HTTP_" + str(response.status_code))
+                data = response.json()
+                usage = data.get("usage")
+                if usage and all(
+                    isinstance(usage.get(k), int) and usage[k] >= 0
+                    for k in ("prompt_tokens", "completion_tokens", "total_tokens")
+                ):
+                    self.store.settle(call_id, usage)
+                else:
+                    self.store.settle(call_id)
+                if data.get("model") != self.config.model:
+                    raise ModelError("UNEXPECTED_MODEL")
+                choice = data["choices"][0]
+                if choice.get("finish_reason") != "stop":
+                    raise ModelError("INCOMPLETE_GENERATION")
+                text = choice["message"]["content"]
+                if not isinstance(text, str) or not text.strip():
+                    raise ModelError("EMPTY_GENERATION")
+                # Never expose reasoning as publication content.
+                if "<think>" in text or "</think>" in text:
+                    raise ModelError("REASONING_IN_CONTENT")
+                self.failures = 0
+                return text.strip()
+            except asyncio.CancelledError:
+                self.store.settle(call_id)
+                raise
+            except Exception as exc:
+                row = self.store.conn.execute(
+                    "SELECT state FROM calls WHERE id=?", (call_id,)
+                ).fetchone()
+                if row[0] == "pending":
+                    self.store.settle(call_id)
+                self.failures += 1
+                if self.failures >= 3:
+                    self.blocked_until = time.time() + 300
+                code = str(exc) if isinstance(exc, ModelError) else "PROVIDER_UNAVAILABLE"
+                self.store.error("minimax", code)
+                raise ModelError(code) from None

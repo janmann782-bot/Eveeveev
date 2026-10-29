@@ -1,0 +1,10 @@
+{
+  "source": "Aurelia_Wiki_updated.xml",
+  "source_version": "24",
+  "source_date": "2026-10-29",
+  "sha256": "9125be7a82e4f75d66a4e805ed7beb4480ef758b73f4091c4a5366736c2f71c5",
+  "pages_in_export": 834,
+  "indexed_articles": 575,
+  "chunks": 1820,
+  "import_policy": "main namespace, excluding redirects and templates; no user chat history"
+}
