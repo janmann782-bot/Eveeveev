@@ -80,34 +80,71 @@ def validate_text(text, secrets=()):
 
 
 
+def extract_news_text(raw):
+    """Accept plain posts and common JSON wrappers, never silently publish metadata."""
+    if not isinstance(raw, str) or not raw.strip():
+        raise ModelError("EMPTY_NEWS_RESPONSE")
+    content = raw.strip()
+    fence = re.fullmatch(r"```(?:json|text)?\s*\n(.*?)\n?```", content, re.S | re.I)
+    if fence:
+        content = fence.group(1).strip()
+
+    def unpack(value, depth=0):
+        if depth > 4:
+            raise ModelError("INVALID_POST_FORMAT")
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                raise ModelError("MISSING_POST_CONTENT")
+            if value.startswith(("{", "[")):
+                try:
+                    value = json.loads(value)
+                except (ValueError, TypeError):
+                    raise ModelError("INVALID_JSON") from None
+                return unpack(value, depth + 1)
+            return value
+        if isinstance(value, dict):
+            title = next(
+                (value[key].strip() for key in
+                 ("Заголовок", "заголовок", "title", "headline")
+                 if isinstance(value.get(key), str) and value[key].strip()),
+                "",
+            )
+            for key in (
+                "text", "Текст", "текст", "body", "content", "publication",
+                "публикация", "article", "post", "news", "result", "data",
+                "response", "message",
+            ):
+                candidate = value.get(key)
+                if not isinstance(candidate, (str, dict)):
+                    continue
+                body = unpack(candidate, depth + 1)
+                if title and not body.startswith(title):
+                    return title + "\n\n" + body
+                return body
+            raise ModelError("MISSING_POST_CONTENT")
+        raise ModelError("INVALID_POST_FORMAT")
+
+    return unpack(content)
+
+
 def retry_instruction(code, candidate=None):
-    """Return safe feedback; never echo a rejected model output."""
-    if code == "INVALID_TEXT_LENGTH":
+    """Give model actionable correction without echoing rejected or private text."""
+    if code in ("INVALID_TEXT_LENGTH", "MISSING_POST_CONTENT", "EMPTY_NEWS_RESPONSE"):
         if not isinstance(candidate, str) or not candidate.strip():
-            return (
-                "Поле text отсутствует или пустое. Напиши полную новость по-русски "
-                "от 800 до 1 800 символов: заголовок и 3-5 абзацев. "
-                "Ответь внешним JSON по output_schema, поле text - сама новость."
-            )
-        if len(candidate) < 30:
-            return (
-                "Предыдущий текст слишком короткий. Напиши полноценную новость "
-                "от 800 до 1 800 символов с заголовком и 3-5 абзацами. "
-                "Верни внешний JSON по output_schema с готовой новостью в поле text."
-            )
-        return (
-            "Предыдущий текст слишком длинный для публикации. Напиши новую "
-            "самостоятельную новость от 800 до 1 800 символов, с заголовком "
-            "и 3-5 законченными абзацами. Не обрывай текст посередине. "
-            "Верни внешний JSON по output_schema с готовой новостью в поле text."
-        )
+            detail = "В предыдущем ответе нет готовой новости."
+        elif len(candidate) < 30:
+            detail = "Предыдущая новость слишком короткая."
+        else:
+            detail = "Предыдущая новость слишком длинная или оформлена неверно."
+    else:
+        detail = "Редактор отклонил предыдущую новость: " + code + "."
     return (
-        "Исправь редакционную ошибку "
-        + code
-        + ". Напиши новый самостоятельный выпуск по исходному заданию. "
-        "Верни только внешний JSON по output_schema. Поле text должно "
-        "содержать обычный готовый пост: заголовок и абзацы, без JSON, "
-        "сломанного языка или бессмысленных чисел. Проверяй арифметику."
+        detail
+        + " Напиши полностью новую законченную новость от 800 до 1 800 "
+        "символов, с заголовком и 3-5 абзацами. Верни ТОЛЬКО русский текст "
+        "публикации, без JSON, служебных полей и Markdown-блоков. "
+        "Проверь имена, факты и арифметику."
     )
 
 
@@ -194,35 +231,28 @@ class NewsDesk:
         elif plan["kind"] == "crossover":
             instruction = "Свяжи последствия 2 разных выбранных историй в 1 новое событие и закрой это пересечение."
         messages = [
-                    {"role": "system", "content": NEWS_STYLE},
+            {"role": "system", "content": NEWS_STYLE},
+            {
+                "role": "user",
+                "content": json.dumps(
                     {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "task": instruction,
-                                "target_post_length": "800-1800 символов, включая заголовок",
-                                "max_post_length": 3400,
-                                "topic": plan["topic"],
-                                "location": plan["location"],
-                                "canon": sources,
-                                "channel_events_not_canon": [
-                                    {"id": r["id"], "text": r["body"][:800]} for r in recent[:12]
-                                ],
-                                "continue_only": [
-                                    {"id": r["id"], "text": r["body"]} for r in plan["parents"]
-                                ],
-                                "output_schema": {
-                                    "text": "готовый пост",
-                                    "organizations": ["имена"],
-                                    "characters": ["имена"],
-                                    "consequences": "последствия",
-                                    "story_status": "open или closed",
-                                },
-                            },
-                            ensure_ascii=False,
-                        ),
+                        "task": instruction,
+                        "target_post_length": "800-1800 символов включая заголовок",
+                        "topic": plan["topic"],
+                        "location": plan["location"],
+                        "canon": sources,
+                        "channel_events_not_canon": [
+                            {"id": r["id"], "text": r["body"][:800]} for r in recent[:12]
+                        ],
+                        "continue_only": [
+                            {"id": r["id"], "text": r["body"]} for r in plan["parents"]
+                        ],
+                        "output": "Только полный текст новости без JSON и технических полей",
                     },
-                ]
+                    ensure_ascii=False,
+                ),
+            },
+        ]
         retryable = {
             "RAW_JSON_IN_POST",
             "CORRUPTED_MIXED_SCRIPT",
@@ -231,6 +261,9 @@ class NewsDesk:
             "INVALID_TEXT_LENGTH",
             "INVALID_JSON",
             "INVALID_JSON_OBJECT",
+            "MISSING_POST_CONTENT",
+            "EMPTY_NEWS_RESPONSE",
+            "INVALID_POST_FORMAT",
             "CANON_REVIEW_REQUIRED",
             "SPECIAL_HEADING_MISSING",
             "UNSCHEDULED_SPECIAL",
@@ -241,10 +274,8 @@ class NewsDesk:
         for attempt in range(3):
             text = None
             try:
-                data = parse_object(
-                    await self.model.generate(messages, "news", json_mode=True)
-                )
-                text = data.get("text")
+                raw = await self.model.generate(messages, "news")
+                text = extract_news_text(raw)
                 validate_text(text, (self.config.api_key, self.config.bot_token))
                 if (
                     plan["kind"] == "delirium"
@@ -253,41 +284,40 @@ class NewsDesk:
                     raise ModelError("SPECIAL_HEADING_MISSING")
                 if plan["kind"] != "delirium" and "белая горячка тимофея рализма" in text.lower():
                     raise ModelError("UNSCHEDULED_SPECIAL")
-                for key in ("organizations", "characters"):
-                    if (
-                        not isinstance(data.get(key), list)
-                        or len(data[key]) > 20
-                        or any(not isinstance(v, str) or len(v) > 200 for v in data[key])
-                    ):
-                        raise ModelError("INVALID_EVENT_METADATA")
-                if data.get("story_status") not in ("open", "closed") or not isinstance(
-                    data.get("consequences"), str
-                ):
-                    raise ModelError("INVALID_STORY_METADATA")
                 for event in recent:
                     if SequenceMatcher(None, text.lower(), event["body"].lower()).ratio() > 0.72:
                         raise ModelError("REPETITIVE_NEWS")
-                if plan["kind"] in ("crossover", "delirium") or plan["depth"] >= 2:
-                    data["story_status"] = "closed"
-                data["related_events"] = [r["id"] for r in plan["parents"]]
-                data["canon_sources"] = [r["id"] for r in sources]
                 await self.audit(text, plan["location"] + " " + plan["topic"])
             except ModelError as exc:
                 code = str(exc)
-                if code == "INVALID_TEXT_LENGTH":
-                    if isinstance(text, str):
-                        reason = "TOO_LONG" if len(text) > 3800 else "TOO_SHORT"
-                    else:
+                if code in ("INVALID_TEXT_LENGTH", "MISSING_POST_CONTENT", "EMPTY_NEWS_RESPONSE"):
+                    if not isinstance(text, str):
                         reason = "MISSING_TEXT"
+                    else:
+                        reason = "TOO_LONG" if len(text) > 3800 else "TOO_SHORT"
                     self.store.error("news_quality", reason)
-                # Other errors keep the original 2-attempt budget.
-                if code not in retryable or attempt == 2 or (attempt >= 1 and code != "INVALID_TEXT_LENGTH"):
+                if code not in retryable or attempt == 2:
                     raise
-                messages.append({
+                # A fresh request, never reuse a malformed response as chat context.
+                messages = messages[:2] + [{
                     "role": "user",
                     "content": retry_instruction(code, text),
-                })
+                }]
                 continue
+
+            data = {
+                "text": text,
+                "organizations": [],
+                "characters": [],
+                "consequences": text.split("\n\n")[-1][:500],
+                "story_status": (
+                    "closed"
+                    if plan["kind"] in ("delirium", "crossover") or plan["depth"] >= 2
+                    else "open"
+                ),
+                "related_events": [r["id"] for r in plan["parents"]],
+                "canon_sources": [r["id"] for r in sources],
+            }
             return self.store.draft(
                 data, plan["kind"], plan["topic"], plan["location"], plan["story"], plan["depth"]
             )
